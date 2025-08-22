@@ -1,0 +1,25 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.4.0
+  hooks:
+    - id: check-yaml
+    - id: end-of-file-fixer
+    - id: trailing-whitespace
+
+- repo: https://github.com/golangci/golangci-lint
+  rev: v1.57.2
+  hooks:
+    - id: golangci-lint
+
+- repo: local
+  hooks:
+    - id: go-fmt
+      name: go fmt
+      entry: bash -c '/usr/local/go/bin/go fmt ./...'
+      language: system
+      pass_filenames: false
+    - id: go-test-short
+      name: go test -short
+      entry: bash -c '/usr/local/go/bin/go test -short -race ./...'
+      language: system
+      pass_filenames: false
