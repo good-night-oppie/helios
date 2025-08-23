@@ -37,6 +37,11 @@ func (v *VST) WriteFile(path string, content []byte) {
 	v.cur[path] = cp
 }
 
+// DeleteFile removes a file from the current working set.
+func (v *VST) DeleteFile(path string) {
+	delete(v.cur, path)
+}
+
 // ReadFile reads a file from the current working set (copy returned).
 func (v *VST) ReadFile(path string) []byte {
 	b, ok := v.cur[path]
@@ -206,55 +211,6 @@ func (v *VST) Restore(id types.SnapshotID) error {
 	}
 	v.cur = next
 	return nil
-}
-
-// Diff compares two snapshots and returns Added/Changed/Deleted counts.
-func (v *VST) Diff(from, to types.SnapshotID) (types.DiffStats, error) {
-	a, ok := v.snaps[from]
-	b, ok2 := v.snaps[to]
-	if !ok || !ok2 {
-		return types.DiffStats{}, fmt.Errorf("unknown snapshot(s)")
-	}
-	var st types.DiffStats
-	for path, aval := range a {
-		if bval, ok := b[path]; !ok {
-			st.Deleted++
-		} else if !bytesEqual(aval, bval) {
-			st.Changed++
-		}
-	}
-	for path := range b {
-		if _, ok := a[path]; !ok {
-			st.Added++
-		}
-	}
-	return st, nil
-}
-
-// Materialize writes the files from a snapshot to a real directory on disk.
-func (v *VST) Materialize(id types.SnapshotID, outDir string, _ types.MatOpts) (types.CommitMetrics, error) {
-	start := time.Now()
-	snap, ok := v.snaps[id]
-	if !ok {
-		return types.CommitMetrics{}, fmt.Errorf("unknown snapshot: %s", id)
-	}
-
-	var bytesTotal int64
-	for path, content := range snap {
-		dst := filepath.Join(outDir, path)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return types.CommitMetrics{}, err
-		}
-		if err := os.WriteFile(dst, content, 0o644); err != nil {
-			return types.CommitMetrics{}, err
-		}
-		bytesTotal += int64(len(content))
-	}
-	return types.CommitMetrics{
-		CommitLatency: time.Since(start),
-		NewObjects:    int64(len(snap)),
-		NewBytes:      bytesTotal,
-	}, nil
 }
 
 func bytesEqual(a, b []byte) bool {
