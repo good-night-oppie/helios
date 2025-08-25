@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/good-night-oppie/helios-engine/internal/metrics"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
@@ -48,6 +49,10 @@ func (f *FakeEngine) Materialize(id types.SnapshotID, outDir string, opts types.
 
 func (f *FakeEngine) L1Stats() l1cache.CacheStats {
 	return f.l1Stats
+}
+
+func (f *FakeEngine) EngineMetricsSnapshot() metrics.Snapshot {
+	return metrics.Snapshot{}
 }
 
 func TestHandleCommit(t *testing.T) {

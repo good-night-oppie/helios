@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/good-night-oppie/helios-engine/internal/metrics"
 	"github.com/good-night-oppie/helios-engine/internal/util"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
@@ -24,6 +25,7 @@ type VST struct {
 	l1         l1cache.Cache                          // L1 cache (hot data)
 	l2         objstore.Store                         // L2 persistent store
 	pathToHash map[string]types.Hash                  // path -> content hash mapping for L1/L2 retrieval
+	em         *metrics.EngineMetrics                 // engine metrics collector
 }
 
 // New returns a fresh VST.
@@ -32,6 +34,7 @@ func New() *VST {
 		cur:        make(map[string][]byte),
 		snaps:      make(map[types.SnapshotID]map[string][]byte),
 		pathToHash: make(map[string]types.Hash),
+		em:         metrics.NewEngineMetrics(),
 	}
 }
 
@@ -189,8 +192,7 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	treeHash := map[string]types.Hash{}
 	for _, d := range allDirs {
 		// Collect children entries: files we already have; dirs we must reference if present.
-		entries := dirEntries[d][:0]
-		entries = entries[:0]
+		var entries []string
 
 		// Rebuild entries: include file entries already accumulated,
 		// and if directory has subdirectories, we will add them when their hash becomes available.
@@ -245,12 +247,20 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	// Store the snapshot by content (keeps your existing restore/materialize/diff working)
 	v.snaps[id] = snap
 
-	metrics := types.CommitMetrics{
+	commitMetrics := types.CommitMetrics{
 		CommitLatency: time.Since(start),
 		NewObjects:    int64(len(snap)),
 		NewBytes:      newBytes,
 	}
-	return id, metrics, nil
+
+	// Record metrics if collector is available
+	if v.em != nil {
+		v.em.ObserveCommitLatency(commitMetrics.CommitLatency)
+		v.em.AddNewObjects(uint64(commitMetrics.NewObjects))
+		v.em.AddNewBytes(uint64(commitMetrics.NewBytes))
+	}
+
+	return id, commitMetrics, nil
 }
 
 func depth(p string) int {
@@ -302,4 +312,12 @@ func (v *VST) L1Stats() l1cache.CacheStats {
 		return v.l1.Stats()
 	}
 	return l1cache.CacheStats{}
+}
+
+// EngineMetricsSnapshot exposes current metrics for CLI stats.
+func (v *VST) EngineMetricsSnapshot() metrics.Snapshot {
+	if v.em == nil {
+		return metrics.Snapshot{}
+	}
+	return v.em.Snapshot()
 }

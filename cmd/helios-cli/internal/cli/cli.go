@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/good-night-oppie/helios-engine/internal/metrics"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
@@ -22,6 +23,7 @@ type Engine interface {
 	Diff(from, to types.SnapshotID) (types.DiffStats, error)
 	Materialize(id types.SnapshotID, outDir string, opts types.MatOpts) (types.CommitMetrics, error)
 	L1Stats() l1cache.CacheStats
+	EngineMetricsSnapshot() metrics.Snapshot
 }
 
 // Config holds dependencies for CLI handlers
@@ -133,6 +135,8 @@ func HandleStats(w io.Writer, cfg Config) error {
 	}
 
 	st := eng.L1Stats()
+	em := eng.EngineMetricsSnapshot()
+
 	out := map[string]any{
 		"l1": map[string]any{
 			"hits":      st.Hits,
@@ -140,6 +144,13 @@ func HandleStats(w io.Writer, cfg Config) error {
 			"evictions": st.Evictions,
 			"size":      st.SizeBytes,
 			"items":     st.Items,
+		},
+		"engine": map[string]any{
+			"commit_latency_us_p50": em.P50,
+			"commit_latency_us_p95": em.P95,
+			"commit_latency_us_p99": em.P99,
+			"new_objects":           em.NewObjects,
+			"new_bytes":             em.NewBytes,
 		},
 	}
 	return json.NewEncoder(w).Encode(out)

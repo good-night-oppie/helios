@@ -1,1 +1,1 @@
-{"l1":{"evictions":5,"hits":42,"items":37,"misses":13,"size":2048}}
+{"engine":{"commit_latency_us_p50":0,"commit_latency_us_p95":0,"commit_latency_us_p99":0,"new_bytes":0,"new_objects":0},"l1":{"evictions":5,"hits":42,"items":37,"misses":13,"size":2048}}
