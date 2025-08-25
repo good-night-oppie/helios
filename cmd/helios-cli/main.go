@@ -1,0 +1,122 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		return
+	}
+	switch os.Args[1] {
+	case "commit":
+		handleCommit()
+	case "restore":
+		handleRestore()
+	case "diff":
+		handleDiff()
+	case "materialize":
+		handleMaterialize()
+	case "stats":
+		handleStats()
+	case "-h", "--help", "help":
+		usage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Println(`helios-cli
+Commands:
+  commit       --work <path>
+  restore      --id <snapshotID>
+  diff         --from <id> --to <id>
+  materialize  --id <snapshotID> --out <dir> [--include <glob>] [--exclude <glob>]
+  stats`)
+}
+
+// --- CLI configuration ---
+
+func newConfig() cli.Config {
+	return cli.Config{
+		EngineFactory: cli.DefaultEngineFactory,
+	}
+}
+
+// --- commands ---
+
+func handleCommit() {
+	fs := flag.NewFlagSet("commit", flag.ExitOnError)
+	work := fs.String("work", ".", "working directory")
+	_ = fs.Parse(os.Args[2:])
+
+	cfg := newConfig()
+	if err := cli.HandleCommit(os.Stdout, cfg, *work); err != nil {
+		die(err)
+	}
+}
+
+func handleRestore() {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	id := fs.String("id", "", "snapshot id")
+	_ = fs.Parse(os.Args[2:])
+
+	cfg := newConfig()
+	if err := cli.HandleRestore(os.Stdout, cfg, *id); err != nil {
+		die(err)
+	}
+}
+
+func handleDiff() {
+	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	from := fs.String("from", "", "from snapshot id")
+	to := fs.String("to", "", "to snapshot id")
+	_ = fs.Parse(os.Args[2:])
+
+	cfg := newConfig()
+	if err := cli.HandleDiff(os.Stdout, cfg, *from, *to); err != nil {
+		die(err)
+	}
+}
+
+func handleMaterialize() {
+	fs := flag.NewFlagSet("materialize", flag.ExitOnError)
+	id := fs.String("id", "", "snapshot id")
+	outDir := fs.String("out", "", "output directory")
+	include := fs.String("include", "", "include glob (optional)")
+	exclude := fs.String("exclude", "", "exclude glob (optional)")
+	_ = fs.Parse(os.Args[2:])
+
+	opts := cli.MatOpts{}
+	if *include != "" {
+		opts.Include = []string{*include}
+	}
+	if *exclude != "" {
+		opts.Exclude = []string{*exclude}
+	}
+
+	cfg := newConfig()
+	if err := cli.HandleMaterialize(os.Stdout, cfg, *id, *outDir, opts); err != nil {
+		die(err)
+	}
+}
+
+func handleStats() {
+	cfg := newConfig()
+	if err := cli.HandleStats(os.Stdout, cfg); err != nil {
+		die(err)
+	}
+}
+
+func die(err error) {
+	fmt.Fprintln(os.Stderr, err.Error())
+	os.Exit(1)
+}

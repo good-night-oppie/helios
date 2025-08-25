@@ -295,3 +295,11 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+// L1Stats returns L1 cache statistics if L1 is attached.
+func (v *VST) L1Stats() l1cache.CacheStats {
+	if v.l1 != nil {
+		return v.l1.Stats()
+	}
+	return l1cache.CacheStats{}
+}

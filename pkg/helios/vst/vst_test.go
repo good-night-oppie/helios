@@ -66,3 +66,47 @@ func TestVST_CommitRestoreDiffMaterialize(t *testing.T) {
 		t.Fatalf("materialized content want 'hello', got %q", string(b))
 	}
 }
+
+func TestVST_L1Stats(t *testing.T) {
+	v := New()
+
+	// Test with no L1 attached
+	stats := v.L1Stats()
+	if stats.Hits != 0 || stats.Misses != 0 {
+		t.Errorf("expected zero stats with no L1, got %+v", stats)
+	}
+}
+
+func TestVST_ReadFileNotFound(t *testing.T) {
+	v := New()
+	data, err := v.ReadFile("nonexistent.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected nil data for non-existent file, got %v", data)
+	}
+}
+
+func TestMatchGlob_SpecialPatterns(t *testing.T) {
+	tests := []struct {
+		path    string
+		pattern string
+		want    bool
+	}{
+		{"src/main.go", "src/**", true},
+		{"src/deep/nested/file.go", "src/**", true},
+		{"other/file.go", "src/**", false},
+		{"test.go", "*.go", true},
+		{"test.txt", "*.go", false},
+		{"prefix_file", "prefix**", true},
+		{"other_file", "prefix**", false},
+	}
+
+	for _, tt := range tests {
+		got := matchGlob(tt.path, tt.pattern)
+		if got != tt.want {
+			t.Errorf("matchGlob(%q, %q) = %v, want %v", tt.path, tt.pattern, got, tt.want)
+		}
+	}
+}
