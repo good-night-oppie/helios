@@ -9,8 +9,8 @@ import (
 func TestVST_ObjectizedCommit_IsDeterministic(t *testing.T) {
 	v := New()
 
-	v.WriteFile("a.txt", []byte("A"))
-	v.WriteFile("b.txt", []byte("B"))
+	_ = v.WriteFile("a.txt", []byte("A"))
+	_ = v.WriteFile("b.txt", []byte("B"))
 	id1, _, err := v.Commit("first")
 	if err != nil {
 		t.Fatalf("commit 1: %v", err)
@@ -20,8 +20,8 @@ func TestVST_ObjectizedCommit_IsDeterministic(t *testing.T) {
 	if err := v.Restore(id1); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	v.WriteFile("b.txt", []byte("B"))
-	v.WriteFile("a.txt", []byte("A"))
+	_ = v.WriteFile("b.txt", []byte("B"))
+	_ = v.WriteFile("a.txt", []byte("A"))
 	id2, _, err := v.Commit("second")
 	if err != nil {
 		t.Fatalf("commit 2: %v", err)
@@ -37,15 +37,15 @@ func TestVST_ObjectizedCommit_IsDeterministic(t *testing.T) {
 func TestVST_ObjectizedCommit_ChangesAffectRootHash(t *testing.T) {
 	v := New()
 
-	v.WriteFile("a.txt", []byte("A"))
-	v.WriteFile("b.txt", []byte("B"))
+	_ = v.WriteFile("a.txt", []byte("A"))
+	_ = v.WriteFile("b.txt", []byte("B"))
 	id1, _, err := v.Commit("base")
 	if err != nil {
 		t.Fatalf("commit base: %v", err)
 	}
 
 	// Change a single file
-	v.WriteFile("b.txt", []byte("B2"))
+	_ = v.WriteFile("b.txt", []byte("B2"))
 	id2, _, err := v.Commit("delta")
 	if err != nil {
 		t.Fatalf("commit delta: %v", err)

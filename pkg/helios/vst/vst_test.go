@@ -14,8 +14,8 @@ func TestVST_CommitRestoreDiffMaterialize(t *testing.T) {
 	v := New() // not implemented yet
 
 	// Write two files and do the first commit
-	v.WriteFile("hello.txt", []byte("hi"))
-	v.WriteFile("dir/a.txt", []byte("A"))
+	_ = v.WriteFile("hello.txt", []byte("hi"))
+	_ = v.WriteFile("dir/a.txt", []byte("A"))
 	id1, m1, err := v.Commit("init")
 	if err != nil || id1 == "" {
 		t.Fatalf("commit1 err=%v id=%s", err, id1)
@@ -25,7 +25,7 @@ func TestVST_CommitRestoreDiffMaterialize(t *testing.T) {
 	}
 
 	// Modify hello.txt and commit again
-	v.WriteFile("hello.txt", []byte("hello"))
+	_ = v.WriteFile("hello.txt", []byte("hello"))
 	id2, m2, err := v.Commit("update")
 	if err != nil || id2 == "" || id2 == id1 {
 		t.Fatalf("commit2 issue: err=%v id1=%s id2=%s", err, id1, id2)
@@ -47,7 +47,7 @@ func TestVST_CommitRestoreDiffMaterialize(t *testing.T) {
 	if err := v.Restore(id1); err != nil {
 		t.Fatalf("restore err=%v", err)
 	}
-	got := v.ReadFile("hello.txt")
+	got, _ := v.ReadFile("hello.txt")
 	if string(got) != "hi" {
 		t.Fatalf("after restore want 'hi', got %q", string(got))
 	}

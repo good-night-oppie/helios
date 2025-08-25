@@ -9,15 +9,15 @@ func TestVST_Diff_EdgeCases(t *testing.T) {
 	v := New()
 
 	// Base snapshot with two files
-	v.WriteFile("a.txt", []byte("A"))
-	v.WriteFile("b.bin", []byte{0x00, 0x01})
+	_ = v.WriteFile("a.txt", []byte("A"))
+	_ = v.WriteFile("b.bin", []byte{0x00, 0x01})
 	id1, _, err := v.Commit("base")
 	if err != nil {
 		t.Fatalf("commit base: %v", err)
 	}
 
 	// Case 1: add-only
-	v.WriteFile("c.txt", []byte("C"))
+	_ = v.WriteFile("c.txt", []byte("C"))
 	id2, _, _ := v.Commit("add-only")
 	diff, err := v.Diff(id1, id2)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestVST_Diff_EdgeCases(t *testing.T) {
 	}
 	// "rename": remove a.txt and add a_renamed.txt with same content
 	v.DeleteFile("a.txt")
-	v.WriteFile("a_renamed.txt", []byte("A"))
+	_ = v.WriteFile("a_renamed.txt", []byte("A"))
 	// b.bin stays the same
 	id4, _, _ := v.Commit("rename-sim")
 	diff, err = v.Diff(id1, id4)
@@ -62,7 +62,7 @@ func TestVST_Diff_EdgeCases(t *testing.T) {
 	if err := v.Restore(id1); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	v.WriteFile("b.bin", []byte{0x00, 0xFF})
+	_ = v.WriteFile("b.bin", []byte{0x00, 0xFF})
 	id5, _, _ := v.Commit("binary-change")
 	diff, err = v.Diff(id1, id5)
 	if err != nil {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/good-night-oppie/helios-engine/internal/util"
+	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
 )
 
@@ -17,24 +19,34 @@ var _ types.StateManager = (*VST)(nil)
 
 // VST is an in-memory Virtual State Tree used for fast user-space snapshots.
 type VST struct {
-	cur   map[string][]byte                      // current working set
-	snaps map[types.SnapshotID]map[string][]byte // snapshot store
-	seq   int64                                  // monotonic ID generator
+	cur        map[string][]byte                      // current working set
+	snaps      map[types.SnapshotID]map[string][]byte // snapshot store
+	l1         l1cache.Cache                          // L1 cache (hot data)
+	l2         objstore.Store                         // L2 persistent store
+	pathToHash map[string]types.Hash                  // path -> content hash mapping for L1/L2 retrieval
 }
 
 // New returns a fresh VST.
 func New() *VST {
 	return &VST{
-		cur:   make(map[string][]byte),
-		snaps: make(map[types.SnapshotID]map[string][]byte),
+		cur:        make(map[string][]byte),
+		snaps:      make(map[types.SnapshotID]map[string][]byte),
+		pathToHash: make(map[string]types.Hash),
 	}
 }
 
+// AttachStores attaches L1 cache and L2 object store to the VST.
+func (v *VST) AttachStores(l1 l1cache.Cache, l2 objstore.Store) {
+	v.l1 = l1
+	v.l2 = l2
+}
+
 // WriteFile writes/overwrites a file in the current working set (in memory).
-func (v *VST) WriteFile(path string, content []byte) {
+func (v *VST) WriteFile(path string, content []byte) error {
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	v.cur[path] = cp
+	return nil
 }
 
 // DeleteFile removes a file from the current working set.
@@ -43,14 +55,47 @@ func (v *VST) DeleteFile(path string) {
 }
 
 // ReadFile reads a file from the current working set (copy returned).
-func (v *VST) ReadFile(path string) []byte {
+// If the file is not in memory but we have stores attached, it tries L1 then L2.
+func (v *VST) ReadFile(path string) ([]byte, error) {
+	// First check current working set
 	b, ok := v.cur[path]
-	if !ok {
-		return nil
+	if ok {
+		cp := make([]byte, len(b))
+		copy(cp, b)
+		return cp, nil
 	}
-	cp := make([]byte, len(b))
-	copy(cp, b)
-	return cp
+
+	// Try to get from L1/L2 using stored hash
+	hash, hasHash := v.pathToHash[path]
+	if !hasHash {
+		return nil, nil // File doesn't exist
+	}
+
+	// Try L1 first
+	if v.l1 != nil {
+		if data, ok := v.l1.Get(hash); ok {
+			// Found in L1
+			return data, nil
+		}
+		// L1 miss - will try L2
+	}
+
+	// Try L2 and promote to L1
+	if v.l2 != nil {
+		data, ok, err := v.l2.Get(hash)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			// Found in L2, promote to L1 if available
+			if v.l1 != nil {
+				v.l1.Put(hash, data)
+			}
+			return data, nil
+		}
+	}
+
+	return nil, nil // Not found anywhere
 }
 
 // Commit creates a snapshot and returns a content-addressed SnapshotID (Merkle root).
@@ -73,12 +118,30 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	//  2) Aggregate bottom-up by directory: "name:type:childHash"
 	//  3) The root (".") tree hash becomes SnapshotID
 	blobHashByPath := make(map[string]types.Hash, len(v.cur))
+	blobsToStore := make([]objstore.BatchEntry, 0, len(v.cur))
 	for path, content := range v.cur {
 		h, err := util.HashBlob(content)
 		if err != nil {
 			return "", types.CommitMetrics{}, err
 		}
 		blobHashByPath[path] = h
+		// Store path->hash mapping for L1/L2 retrieval
+		v.pathToHash[path] = h
+
+		// Prepare for L2 storage if attached
+		if v.l2 != nil {
+			blobsToStore = append(blobsToStore, objstore.BatchEntry{
+				Hash:  h,
+				Value: content,
+			})
+		}
+	}
+
+	// Store blobs in L2 if attached
+	if v.l2 != nil && len(blobsToStore) > 0 {
+		if err := v.l2.PutBatch(blobsToStore); err != nil {
+			return "", types.CommitMetrics{}, fmt.Errorf("failed to store blobs in L2: %w", err)
+		}
 	}
 
 	// Build directory -> entries list
@@ -204,12 +267,20 @@ func (v *VST) Restore(id types.SnapshotID) error {
 		return fmt.Errorf("unknown snapshot: %s", id)
 	}
 	next := make(map[string][]byte, len(base))
+	pathHashes := make(map[string]types.Hash)
 	for k, val := range base {
 		cp := make([]byte, len(val))
 		copy(cp, val)
 		next[k] = cp
+		// Compute and store hash for L1/L2 retrieval
+		h, err := util.HashBlob(val)
+		if err != nil {
+			return err
+		}
+		pathHashes[k] = h
 	}
 	v.cur = next
+	v.pathToHash = pathHashes
 	return nil
 }
 

@@ -10,9 +10,9 @@ import (
 
 func TestVST_Materialize_WithSelectors(t *testing.T) {
 	v := New()
-	v.WriteFile("src/a.go", []byte("a"))
-	v.WriteFile("src/b.go", []byte("b"))
-	v.WriteFile("docs/readme.md", []byte("# hi"))
+	_ = v.WriteFile("src/a.go", []byte("a"))
+	_ = v.WriteFile("src/b.go", []byte("b"))
+	_ = v.WriteFile("docs/readme.md", []byte("# hi"))
 	id, _, err := v.Commit("with-selectors")
 	if err != nil {
 		t.Fatalf("commit: %v", err)
