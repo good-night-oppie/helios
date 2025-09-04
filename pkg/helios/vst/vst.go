@@ -1,6 +1,7 @@
 package vst
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,14 @@ import (
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
 )
+
+var heliosDebug = os.Getenv("HELIOS_DEBUG") != ""
+
+func dprintf(format string, a ...any) {
+    if heliosDebug {
+        fmt.Fprintf(os.Stderr, "helios-debug: "+format+"\n", a...)
+    }
+}
 
 // Ensure VST implements the StateManager interface at compile time.
 var _ types.StateManager = (*VST)(nil)
@@ -141,7 +150,15 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	}
 
 	// Store blobs in L2 if attached
+	dprintf("commit: l2-attached=%v, blobsToStore=%d", v.l2 != nil, len(blobsToStore))
+	if heliosDebug && len(blobsToStore) > 0 {
+		// Print first few blobs for debugging
+		for i := 0; i < len(blobsToStore) && i < 5; i++ {
+			dprintf("commit: blob[%d]=%s size=%d", i, blobsToStore[i].Hash.String(), len(blobsToStore[i].Value))
+		}
+	}
 	if v.l2 != nil && len(blobsToStore) > 0 {
+		// Store all blobs first
 		if err := v.l2.PutBatch(blobsToStore); err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to store blobs in L2: %w", err)
 		}
@@ -244,6 +261,33 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 
 	id := types.SnapshotID(root.String())
 
+	// Store snapshot metadata in L2 before keeping in memory
+	if v.l2 != nil {
+		// Store snapshot metadata (file list and hashes) alongside the blobs
+		snapshotData := make(map[string]types.Hash)
+		for path, hash := range blobHashByPath {
+			snapshotData[path] = hash
+		}
+		
+		// Marshal snapshot metadata
+		metadataBytes, err := json.Marshal(snapshotData)
+		if err != nil {
+			return "", types.CommitMetrics{}, fmt.Errorf("failed to marshal snapshot metadata: %w", err)
+		}
+		
+		// Store snapshot metadata with special prefix
+		snapshotKey := string("snapshot:" + id)
+		dprintf("commit: storing snapshot metadata with key %s", snapshotKey)
+		snapshotMetadata := []objstore.BatchEntry{{
+			Hash: types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
+			Value: metadataBytes,
+		}}
+		
+		if err := v.l2.PutBatch(snapshotMetadata); err != nil {
+			return "", types.CommitMetrics{}, fmt.Errorf("failed to store snapshot metadata: %w", err)
+		}
+	}
+
 	// Store the snapshot by content (keeps your existing restore/materialize/diff working)
 	v.snaps[id] = snap
 
@@ -273,8 +317,48 @@ func depth(p string) int {
 // Restore replaces the current working set with the files from the given snapshot.
 func (v *VST) Restore(id types.SnapshotID) error {
 	base, ok := v.snaps[id]
-	if !ok {
+	if !ok && v.l2 == nil {
 		return fmt.Errorf("unknown snapshot: %s", id)
+	}
+	
+	// If snapshot is not in memory but L2 is available, try to restore from L2
+	if !ok {
+		// Try to get snapshot metadata from L2
+		if v.l2 != nil {
+			dprintf("restore: trying L2 restore for %s", id)
+			
+			// Get snapshot metadata
+			snapshotKey := string("snapshot:" + id)
+			dprintf("restore: trying to get metadata with key %s", snapshotKey)
+			metadataHash := types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)}
+			metadataBytes, ok, err := v.l2.Get(metadataHash)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("unknown snapshot in L2: %s", id)
+			}
+			
+			// Unmarshal metadata
+			var snapshotData map[string]types.Hash
+			if err := json.Unmarshal(metadataBytes, &snapshotData); err != nil {
+				return fmt.Errorf("failed to unmarshal snapshot metadata: %w", err)
+			}
+			
+			// Restore files from L2
+			base = make(map[string][]byte)
+			for path, hash := range snapshotData {
+				data, ok, err := v.l2.Get(hash)
+				if err != nil {
+					return fmt.Errorf("failed to get file %s: %w", path, err)
+				}
+				if !ok {
+					return fmt.Errorf("missing file data for %s", path)
+				}
+				base[path] = data
+				v.pathToHash[path] = hash // Store hash mapping for future L1/L2 retrieval
+			}
+		}
 	}
 	next := make(map[string][]byte, len(base))
 	pathHashes := make(map[string]types.Hash)
