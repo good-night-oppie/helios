@@ -1,6 +1,7 @@
 package vst
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +13,42 @@ import (
 // Materialize writes the files from a snapshot to a real directory on disk.
 func (v *VST) Materialize(id types.SnapshotID, outDir string, opts types.MatOpts) (types.CommitMetrics, error) {
 	start := time.Now()
+	// First try to get snapshot from memory
 	snap, ok := v.snaps[id]
-	if !ok {
+
+	// If not in memory, try L2
+	if !ok && v.l2 != nil {
+		// Get snapshot metadata
+		snapshotKey := string("snapshot:" + id)
+		dprintf("materialize: trying to get metadata with key %s", snapshotKey)
+		metadataHash := types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)}
+		metadataBytes, ok, err := v.l2.Get(metadataHash)
+		if err != nil {
+			return types.CommitMetrics{}, err
+		}
+		if !ok {
+			return types.CommitMetrics{}, fmt.Errorf("unknown snapshot in L2: %s", id)
+		}
+
+		// Unmarshal metadata
+		var snapshotData map[string]types.Hash
+		if err := json.Unmarshal(metadataBytes, &snapshotData); err != nil {
+			return types.CommitMetrics{}, fmt.Errorf("failed to unmarshal snapshot metadata: %w", err)
+		}
+
+		// Restore files from L2
+		snap = make(map[string][]byte)
+		for path, hash := range snapshotData {
+			data, ok, err := v.l2.Get(hash)
+			if err != nil {
+				return types.CommitMetrics{}, fmt.Errorf("failed to get file %s: %w", path, err)
+			}
+			if !ok {
+				return types.CommitMetrics{}, fmt.Errorf("missing file data for %s", path)
+			}
+			snap[path] = data
+		}
+	} else if !ok {
 		return types.CommitMetrics{}, fmt.Errorf("unknown snapshot: %s", id)
 	}
 

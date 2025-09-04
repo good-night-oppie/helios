@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/good-night-oppie/helios-engine/internal/metrics"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios-engine/pkg/cli"
 )
 
 // Engine interface for testability
@@ -50,6 +53,12 @@ func HandleCommit(w io.Writer, cfg Config, workDir string) error {
 		return err
 	}
 
+	// Ingest current working directory into the engine before committing.
+	// This populates v.cur so that Commit() has real blobs to persist into L2.
+	if err := ingestCurrentDir(eng); err != nil {
+		return err
+	}
+
 	id, _, err := eng.Commit("")
 	if err != nil {
 		return err
@@ -59,6 +68,44 @@ func HandleCommit(w io.Writer, cfg Config, workDir string) error {
 		"snapshot_id": id,
 	}
 	return json.NewEncoder(w).Encode(out)
+}
+
+// ingestCurrentDir walks the current working dir and writes regular files
+// into the engine using relative, slash-normalized paths.
+// Skips internal folders like .git and .helios.
+func ingestCurrentDir(eng interface{ WriteFile(string, []byte) error }) error {
+    root, err := os.Getwd()
+    if err != nil { return err }
+    skip := map[string]struct{}{".git": {}, ".helios": {}}
+
+    return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+        if walkErr != nil { return walkErr }
+        name := d.Name()
+        if d.IsDir() {
+            if _, found := skip[name]; found {
+                return fs.SkipDir
+            }
+            return nil
+        }
+        // Only ingest regular files; skip symlinks, sockets, etc.
+        if !d.Type().IsRegular() { return nil }
+
+        rel, err := filepath.Rel(root, path)
+        if err != nil { return err }
+        rel = filepath.ToSlash(rel)
+        // Double safety: skip anything under .git/ or .helios/
+        if strings.HasPrefix(rel, ".git/") || strings.HasPrefix(rel, ".helios/") {
+            return nil
+        }
+
+        b, err := os.ReadFile(path)
+        if err != nil { return err }
+        if err := eng.WriteFile(rel, b); err != nil { return err }
+        if os.Getenv("HELIOS_DEBUG") == "1" {
+            fmt.Fprintf(os.Stderr, "helios-debug: ingest %s (%d bytes)\n", rel, len(b))
+        }
+        return nil
+    })
 }
 
 // HandleRestore processes restore command
@@ -163,12 +210,19 @@ func DefaultEngineFactory() (Engine, error) {
 	// Attach a small L1 cache for observable stats
 	l1, _ := l1cache.New(l1cache.Config{CapacityBytes: 8 << 20, CompressionThreshold: 256})
 
-	// Persist objects in a hidden folder inside CWD (safe user-space path)
-	cwd, _ := os.Getwd()
-	objDir := filepath.Join(cwd, ".helios", "objects")
-	if err := os.MkdirAll(objDir, 0o755); err != nil {
-		return nil, err
+	// Get store directory using the unified resolver
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get working directory: %w", err)
 	}
+	objDir, err := cli.ResolveStore(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("resolve store directory: %w", err)
+	}
+	if os.Getenv("HELIOS_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "helios-debug: cwd=%s store=%s\n", cwd, objDir)
+	}
+
 	l2, err := objstore.Open(objDir, nil)
 	if err != nil {
 		return nil, err

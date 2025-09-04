@@ -36,10 +36,13 @@ func Open(path string, _ *Options) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	wo := gorocksdb.NewDefaultWriteOptions()
+	wo.SetSync(true)
+
 	return &rocksStore{
 		db: db,
 		ro: gorocksdb.NewDefaultReadOptions(),
-		wo: gorocksdb.NewDefaultWriteOptions(),
+		wo: wo,
 	}, nil
 }
 
@@ -70,7 +73,8 @@ func (s *rocksStore) PutBatch(batch []BatchEntry) error {
 
 	// Iterate through batch and write
 	for _, entry := range batch {
-		k := []byte(entry.Hash.String())
+		// Use only the digest part as key, since String() includes the algorithm prefix
+		k := entry.Hash.Digest
 		wb.Put(k, entry.Value)
 	}
 
@@ -79,7 +83,8 @@ func (s *rocksStore) PutBatch(batch []BatchEntry) error {
 
 // Get returns (value, ok, err). ok=false when key is missing, err on RocksDB error.
 func (s *rocksStore) Get(h types.Hash) ([]byte, bool, error) {
-	k := []byte(h.String())
+	// Use only the digest part as key, since String() includes the algorithm prefix
+	k := h.Digest
 	val, err := s.db.Get(s.ro, k)
 	if err != nil {
 		return nil, false, err
