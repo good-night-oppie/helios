@@ -14,6 +14,7 @@ import (
 	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios-engine/pkg/cli"
 )
 
 // Engine interface for testability
@@ -209,12 +210,19 @@ func DefaultEngineFactory() (Engine, error) {
 	// Attach a small L1 cache for observable stats
 	l1, _ := l1cache.New(l1cache.Config{CapacityBytes: 8 << 20, CompressionThreshold: 256})
 
-	// Persist objects in a hidden folder inside CWD (safe user-space path)
-	cwd, _ := os.Getwd()
-	objDir := filepath.Join(cwd, ".helios", "objects")
-	if err := os.MkdirAll(objDir, 0o755); err != nil {
-		return nil, err
+	// Get store directory using the unified resolver
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get working directory: %w", err)
 	}
+	objDir, err := cli.ResolveStore(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("resolve store directory: %w", err)
+	}
+	if os.Getenv("HELIOS_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "helios-debug: cwd=%s store=%s\n", cwd, objDir)
+	}
+
 	l2, err := objstore.Open(objDir, nil)
 	if err != nil {
 		return nil, err
