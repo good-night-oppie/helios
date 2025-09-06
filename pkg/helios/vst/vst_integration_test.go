@@ -57,11 +57,15 @@ func TestCommit_StoresDataInL2(t *testing.T) {
 
 // Test scenario 2: Restore snapshot and verify L2 -> L1 promotion
 func TestRestore_PromotesFromL2ToL1(t *testing.T) {
-	// Create stores
-	l1, _ := l1cache.New(l1cache.Config{
-		CapacityBytes:        8 << 20,
+	// Create a fresh L1 for engine #1 (write path), and a shared L2 object store.
+	l1a, err := l1cache.New(l1cache.Config{
+		CapacityBytes:        8 << 20, // 8 MiB
 		CompressionThreshold: 256,
 	})
+	if err != nil {
+		t.Fatalf("new l1a: %v", err)
+	}
+
 	l2Dir := t.TempDir()
 	l2, err := objstore.Open(filepath.Join(l2Dir, "rocks"), nil)
 	if err != nil {
@@ -69,60 +73,76 @@ func TestRestore_PromotesFromL2ToL1(t *testing.T) {
 	}
 	defer l2.Close()
 
-	// First engine: commit data
+	// Engine #1: write content and commit so that data ends up in L2.
 	eng1 := vst.New()
-	eng1.AttachStores(l1, l2)
+	eng1.AttachStores(l1a, l2)
 
 	content := []byte("test content for cache")
-	_ = eng1.WriteFile("cached.txt", content)
+	if err := eng1.WriteFile("cached.txt", content); err != nil {
+		t.Fatalf("write (eng1): %v", err)
+	}
 	id1, _, err := eng1.Commit("")
 	if err != nil {
-		t.Fatalf("commit: %v", err)
+		t.Fatalf("commit (eng1): %v", err)
 	}
 
-	// Second engine: restore from same snapshot (simulating restart)
-	eng2 := vst.New()
-	eng2.AttachStores(l1, l2)
-
-	// This will work if snapshot is in memory
-	err = eng2.Restore(id1)
+	// Engine #2: use a *fresh* L1 so the first read is guaranteed to miss and promote from L2.
+	l1b, err := l1cache.New(l1cache.Config{
+		CapacityBytes:        8 << 20, // 8 MiB
+		CompressionThreshold: 256,
+	})
 	if err != nil {
-		// Expected: snapshot not found in new engine
-		// For full integration, we'd need to persist snapshot metadata to L2
+		t.Fatalf("new l1b: %v", err)
+	}
+	beforeCreation := l1b.Stats()
+	t.Logf("L1 stats after creation: %+v", beforeCreation)
+
+	eng2 := vst.New()
+	eng2.AttachStores(l1b, l2)
+
+	// Attempt to restore the snapshot into engine #2.
+	// If snapshot metadata isn't persisted to L2, this may fail by design; skip in that case.
+	if err := eng2.Restore(id1); err != nil {
 		t.Skip("Cross-engine snapshot restore requires metadata persistence")
 	}
 
-	// Get initial L1 stats
-	stats1 := l1.Stats()
+	// 1) Take L1 stats from the engine, not from the raw l1b handle, to ensure we observe the cache actually used.
+	before := eng2.L1Stats()
+	t.Logf("Before read: %+v", before)
 
-	// First read - should cause L1 miss and promotion from L2
+	// 2) Read through the engine path that traverses the object layer (and hence the L1 cache).
+	// If your ReadFile implementation does not go through the object store → L1, replace this call
+	// with the appropriate API that fetches from object storage (e.g., eng2.Store().Get(...)).
 	data1, err := eng2.ReadFile("cached.txt")
 	if err != nil {
-		t.Fatalf("first read error: %v", err)
+		t.Fatalf("first read (eng2): %v", err)
 	}
 	if !bytes.Equal(data1, content) {
 		t.Fatal("content mismatch on first read")
 	}
 
-	stats2 := l1.Stats()
-	// We expect misses to increase (tried L1 first)
-	if stats2.Misses <= stats1.Misses {
-		t.Fatalf("expected L1 miss on first read, stats before: %+v, after: %+v", stats1, stats2)
+	after1 := eng2.L1Stats()
+	t.Logf("After first read: %+v", after1)
+	// Expect a miss recorded on first read (and an item promoted into L1)
+	if after1.Misses <= before.Misses {
+		t.Fatalf("expected L1 miss on first read, before=%+v after=%+v", before, after1)
+	}
+	if after1.Items <= before.Items {
+		t.Fatalf("expected L1 promotion to increase items, before=%+v after=%+v", before, after1)
 	}
 
-	// Second read - should hit L1
+	// Second read should now hit L1.
 	data2, err := eng2.ReadFile("cached.txt")
 	if err != nil {
-		t.Fatalf("second read error: %v", err)
+		t.Fatalf("second read (eng2): %v", err)
 	}
 	if !bytes.Equal(data2, content) {
 		t.Fatal("content mismatch on second read")
 	}
 
-	stats3 := l1.Stats()
-	// We expect hits to increase
-	if stats3.Hits <= stats2.Hits {
-		t.Fatalf("expected L1 hit on second read, stats before: %+v, after: %+v", stats2, stats3)
+	after2 := eng2.L1Stats()
+	if after2.Hits <= after1.Hits {
+		t.Fatalf("expected L1 hit on second read, before=%+v after=%+v", after1, after2)
 	}
 }
 
