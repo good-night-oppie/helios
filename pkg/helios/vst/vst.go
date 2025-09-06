@@ -51,6 +51,9 @@ func New() *VST {
 func (v *VST) AttachStores(l1 l1cache.Cache, l2 objstore.Store) {
 	v.l1 = l1
 	v.l2 = l2
+	if l1 != nil {
+		dprintf("attached L1 cache: %+v", l1.Stats())
+	}
 }
 
 // WriteFile writes/overwrites a file in the current working set (in memory).
@@ -83,20 +86,21 @@ func (v *VST) ReadFile(path string) ([]byte, error) {
 		return nil, nil // File doesn't exist
 	}
 
-	// Try L1 first
+	// Always try L1 first to ensure miss is recorded
+	l1Hit := false
+	var l1Data []byte
 	if v.l1 != nil {
-		if data, ok := v.l1.Get(hash); ok {
-			// Found in L1
-			return data, nil
-		}
-		// L1 miss - will try L2
+		l1Data, l1Hit = v.l1.Get(hash)
+	}
+	if l1Hit {
+		return l1Data, nil
 	}
 
-	// Try L2 and promote to L1
+	// On L1 miss, try L2 store
 	if v.l2 != nil {
 		data, ok, err := v.l2.Get(hash)
 		if err != nil {
-			return nil, err
+			return nil, err // Return L2 errors without affecting cache stats
 		}
 		if ok {
 			// Found in L2, promote to L1 if available
@@ -316,6 +320,7 @@ func depth(p string) int {
 
 // Restore replaces the current working set with the files from the given snapshot.
 func (v *VST) Restore(id types.SnapshotID) error {
+	dprintf("starting restore of snapshot %s (in-memory snapshots=%+v)", id, v.snaps)
 	base, ok := v.snaps[id]
 	if !ok && v.l2 == nil {
 		return fmt.Errorf("unknown snapshot: %s", id)
@@ -344,37 +349,32 @@ func (v *VST) Restore(id types.SnapshotID) error {
 			if err := json.Unmarshal(metadataBytes, &snapshotData); err != nil {
 				return fmt.Errorf("failed to unmarshal snapshot metadata: %w", err)
 			}
+			dprintf("restore: got snapshot metadata with %d files", len(snapshotData))
 			
-			// Restore files from L2
-			base = make(map[string][]byte)
-			for path, hash := range snapshotData {
-				data, ok, err := v.l2.Get(hash)
-				if err != nil {
-					return fmt.Errorf("failed to get file %s: %w", path, err)
-				}
-				if !ok {
-					return fmt.Errorf("missing file data for %s", path)
-				}
-				base[path] = data
-				v.pathToHash[path] = hash // Store hash mapping for future L1/L2 retrieval
+			// Reset working state and use snapshot metadata as path→hash mapping
+			v.cur = make(map[string][]byte)
+			v.pathToHash = snapshotData
+		}
+	}
+	// Copy in-memory snapshot to working set if not restoring from L2
+	if len(base) > 0 {
+		next := make(map[string][]byte, len(base))
+		pathHashes := make(map[string]types.Hash, len(base))
+		for k, val := range base {
+			cp := make([]byte, len(val))
+			copy(cp, val)
+			next[k] = cp
+			
+			// Always compute hash for in-memory snapshot files
+			h, err := util.HashBlob(val)
+			if err != nil {
+				return err
 			}
+			pathHashes[k] = h
 		}
+		v.cur = next
+		v.pathToHash = pathHashes
 	}
-	next := make(map[string][]byte, len(base))
-	pathHashes := make(map[string]types.Hash)
-	for k, val := range base {
-		cp := make([]byte, len(val))
-		copy(cp, val)
-		next[k] = cp
-		// Compute and store hash for L1/L2 retrieval
-		h, err := util.HashBlob(val)
-		if err != nil {
-			return err
-		}
-		pathHashes[k] = h
-	}
-	v.cur = next
-	v.pathToHash = pathHashes
 	return nil
 }
 
@@ -392,10 +392,11 @@ func bytesEqual(a, b []byte) bool {
 
 // L1Stats returns L1 cache statistics if L1 is attached.
 func (v *VST) L1Stats() l1cache.CacheStats {
+	var stats l1cache.CacheStats
 	if v.l1 != nil {
-		return v.l1.Stats()
+		stats = v.l1.Stats()
 	}
-	return l1cache.CacheStats{}
+	return stats
 }
 
 // EngineMetricsSnapshot exposes current metrics for CLI stats.
