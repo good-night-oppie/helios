@@ -52,9 +52,7 @@ func New(cfg Config) (Cache, error) {
 	if cfg.CapacityBytes < 0 {
 		cfg.CapacityBytes = 0
 	}
-	if cfg.CapacityBytes == 0 {
-		panic("cache capacity must be greater than 0")
-	}
+	// Note: capacity=0 is valid for a "disabled cache" that never stores anything
 	enc, err := zstd.NewWriter(nil)
 	if err != nil {
 		return nil, err
