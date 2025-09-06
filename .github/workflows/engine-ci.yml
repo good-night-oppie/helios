@@ -1,0 +1,63 @@
+name: Engine CI
+
+on:
+  push:         { branches: [ main, feat/**, fix/** ] }
+  pull_request: { branches: [ main ] }
+
+concurrency:
+  group: engine-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      # Checkout engine repo (this file lives here)
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Install Go pinned by go.mod
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: false }
+
+      # Install CGO + RocksDB dependencies for gorocksdb
+      - name: Install RocksDB deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            librocksdb-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
+
+      # Static checks (fast)
+      - name: go vet
+        run: go vet ./...
+
+      # Run unit tests (CGO on)
+      - name: go test
+        run: |
+          export CGO_ENABLED=1
+          go test -v ./...
+
+      # Ensure the CLI can build (auto-detect main under cmd/*)
+      - name: Build CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN="$(go list -f '{{if eq .Name "main"}}{{.Dir}}{{end}}' ./... | grep -E '/cmd/[^/]+$' | head -n1)"
+          mkdir -p dist
+          CGO_ENABLED=1 go build -C "$MAIN" -o dist/helios .
+          sha256sum dist/helios | tee dist/helios.sha256
+
+      # Keep the binary and checksum as artifacts (nice for debugging)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helios-linux-amd64
+          path: dist/*
