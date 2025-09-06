@@ -19,16 +19,20 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       DEBIAN_FRONTEND: noninteractive
+
     steps:
+      # Check out repository code
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Set up Go environment based on go.mod
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
 
+      # Install required system libraries for RocksDB
       - name: Install RocksDB deps
         run: |
           sudo apt-get update
@@ -36,24 +40,33 @@ jobs:
             build-essential pkg-config \
             librocksdb-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
 
+      # Run static analysis
       - name: go vet
         run: go vet ./...
 
+      # Run Go unit tests with CGO enabled
       - name: go test
         run: |
           export CGO_ENABLED=1
           go test -v ./...
 
+      # Build the CLI binary
       - name: Build CLI
         shell: bash
         run: |
           set -euo pipefail
+          # Locate the first "main" package inside /cmd/*
           MAIN="$(go list -f '{{if eq .Name "main"}}{{.Dir}}{{end}}' ./... | grep -E '/cmd/[^/]+$' | head -n1)"
           mkdir -p dist
+          # Build the binary into dist/helios
           CGO_ENABLED=1 go build -C "$MAIN" -o dist/helios .
+          # Generate SHA256 checksum
           sha256sum dist/helios | tee dist/helios.sha256
+          # Leave a trailing newline here to safely end the block
 
-      - uses: actions/upload-artifact@v4
+      # Upload built artifact so it can be downloaded later
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: helios-linux-amd64
           path: dist/*
