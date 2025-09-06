@@ -1,31 +1,49 @@
 name: Engine CI
+
 on:
-  push:         { branches: [ master, feat/**, fix/** ] }
-  pull_request: { branches: [ master ] }
-  workflow_dispatch: {}
-concurrency: { group: engine-ci-${{ github.ref }}, cancel-in-progress: true }
-permissions: { contents: read }
+  push:
+    branches: [ master, feat/**, fix/** ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+concurrency:
+  group: "engine-ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-22.04
-    env: { DEBIAN_FRONTEND: noninteractive }
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, cache: false }
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Install RocksDB deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
             librocksdb-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
+
       - name: go vet
         run: go vet ./...
+
       - name: go test
         run: |
           export CGO_ENABLED=1
           go test -v ./...
+
       - name: Build CLI
         shell: bash
         run: |
@@ -34,5 +52,8 @@ jobs:
           mkdir -p dist
           CGO_ENABLED=1 go build -C "$MAIN" -o dist/helios .
           sha256sum dist/helios | tee dist/helios.sha256
+
       - uses: actions/upload-artifact@v4
-        with: { name: helios-linux-amd64, path: dist/* }
+        with:
+          name: helios-linux-amd64
+          path: dist/*
