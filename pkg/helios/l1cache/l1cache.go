@@ -52,6 +52,9 @@ func New(cfg Config) (Cache, error) {
 	if cfg.CapacityBytes < 0 {
 		cfg.CapacityBytes = 0
 	}
+	if cfg.CapacityBytes == 0 {
+		panic("cache capacity must be greater than 0")
+	}
 	enc, err := zstd.NewWriter(nil)
 	if err != nil {
 		return nil, err
@@ -79,12 +82,9 @@ func (c *cache) Put(h types.Hash, raw []byte) (int, bool) {
 	k := c.key(h)
 	var store []byte
 	compressed := false
-	tryCompress := c.threshold <= 0 || len(raw) >= c.threshold
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if tryCompress {
+	
+	// Compress data if appropriate
+	if c.threshold <= 0 || len(raw) >= c.threshold {
 		comp := c.enc.EncodeAll(raw, nil)
 		if len(comp) < len(raw) {
 			store = comp
@@ -97,11 +97,13 @@ func (c *cache) Put(h types.Hash, raw []byte) (int, bool) {
 	}
 	need := int64(len(store))
 	if need > c.capBytes {
-		// object larger than cache capacity → skip caching
-		return 0, false
+		return 0, false // skip if too large
 	}
 
-	// if already exists, remove old entry and free space
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Clear existing entry
 	if old, ok := c.entries[k]; ok {
 		c.sizeBytes -= int64(len(old.data))
 		c.deleteFromOrder(k)
@@ -109,7 +111,7 @@ func (c *cache) Put(h types.Hash, raw []byte) (int, bool) {
 		c.stats.Items--
 	}
 
-	// evict until there is enough space (FIFO)
+	// FIFO eviction
 	for c.sizeBytes+need > c.capBytes && len(c.order) > 0 {
 		evictK := c.order[0]
 		c.order = c.order[1:]
@@ -121,12 +123,14 @@ func (c *cache) Put(h types.Hash, raw []byte) (int, bool) {
 		}
 	}
 
+	// Add new entry
 	ent := &entry{k: k, data: store, rawSize: len(raw), compressed: compressed}
 	c.entries[k] = ent
 	c.order = append(c.order, k)
 	c.sizeBytes += need
 	c.stats.Items++
 	c.stats.SizeBytes = uint64(c.sizeBytes)
+
 	return len(store), compressed
 }
 
@@ -137,37 +141,45 @@ func (c *cache) Get(h types.Hash) ([]byte, bool) {
 	k := c.key(h)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	ent, ok := c.entries[k]
 	if !ok {
 		c.stats.Misses++
+		c.mu.Unlock()
 		return nil, false
 	}
 
-	if ent.compressed {
-		dec, err := c.dec.DecodeAll(ent.data, nil)
+	// Copy entry data while locked
+	data := make([]byte, len(ent.data))
+	copy(data, ent.data)
+	compressed := ent.compressed
+	c.stats.Hits++ // Update hit counter while locked
+	c.mu.Unlock()
+
+	// Decompress if needed (outside lock)
+	if compressed {
+		dec, err := c.dec.DecodeAll(data, nil)
 		if err != nil {
-			// decompression failed, count as miss (do not panic)
-			c.stats.Misses++
+			c.mu.Lock()
+			c.stats.Misses++ // Count decompression failure as miss
+			c.mu.Unlock()
 			return nil, false
 		}
-		c.stats.Hits++
 		return dec, true
 	}
 
-	out := make([]byte, len(ent.data))
-	copy(out, ent.data)
-	c.stats.Hits++
-	return out, true
+	return data, true
 }
 
 func (c *cache) Stats() CacheStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st := c.stats
-	st.SizeBytes = uint64(c.sizeBytes)
-	return st
+	return CacheStats{
+		Hits:      c.stats.Hits,
+		Misses:    c.stats.Misses,
+		Evictions: c.stats.Evictions,
+		SizeBytes: uint64(c.sizeBytes),
+		Items:     c.stats.Items,
+	}
 }
 
 func (c *cache) deleteFromOrder(k string) {
