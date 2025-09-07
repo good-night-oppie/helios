@@ -235,7 +235,7 @@ PRD*_OPPIE_THUNDER_ARCHITECTURE*.txt
 # tasks.json
 # tasks/ 
 
-# Configuration and tool directories
+# Configuration and tool directories (private/local only)
 .claude.template/
 .cursor/
 .gemini-oddity/
@@ -250,14 +250,4 @@ PRD*_OPPIE_THUNDER_ARCHITECTURE*.txt
 .taskmaster/
 .tdd-guard.template.json
 .trae/
-AGENT.md
-AGENTS.md
-CLAUDE.md
-CLAUDE_COMMANDS.md
-PRINCIPLES.md
-TECHNICAL_REPORT.md
-agents/
-archive/
 cmd/helios-cli/.helios/
-demo/
-stress/
