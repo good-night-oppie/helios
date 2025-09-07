@@ -1,0 +1,23 @@
+{
+  "default": true,
+  "MD013": {
+    "line_length": 120,
+    "code_blocks": false,
+    "tables": false
+  },
+  "MD022": {
+    "lines_above": 1,
+    "lines_below": 1
+  },
+  "MD031": {
+    "list_items": true
+  },
+  "MD032": {
+    "stern": false
+  },
+  "MD034": false,
+  "MD040": {
+    "allowed_languages": ["", "text", "txt", "plain", "bash", "json", "yaml", "mermaid", "python", "typescript", "markdown"]
+  },
+  "MD047": true
+}

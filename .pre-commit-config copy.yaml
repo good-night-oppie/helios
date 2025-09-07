@@ -1,0 +1,66 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-added-large-files
+  # 采用本地 hook，避免对特定第三方 hook 的强依赖；工具需已安装
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt check
+        entry: bash -c "gofmt -l . | tee /dev/stderr | (! read)"
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c "command -v golangci-lint >/dev/null && golangci-lint run || echo 'golangci-lint not installed, skipping'"
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: staticcheck
+        name: staticcheck
+        entry: bash -c "command -v staticcheck >/dev/null && staticcheck ./... || echo 'staticcheck not installed, skipping'"
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: reuse-lint
+        name: REUSE compliance
+        entry: bash -c "command -v reuse >/dev/null && reuse lint || echo 'reuse not installed, skipping'"
+        language: system
+        pass_filenames: false
+
+      - id: spdx-header-check
+        name: SPDX License Header Check
+        entry: bash -c 'missing=0; for file in $(find . -name "*.go" -not -path "./blue_team/*" -not -path "./.git/*" -not -path "./vendor/*"); do if ! head -n 3 "$file" | grep -q "SPDX-License-Identifier: MIT"; then echo "Missing SPDX header in: $file"; missing=$((missing + 1)); fi; done; if [ $missing -gt 0 ]; then echo "Found $missing files without proper SPDX headers"; exit 1; fi; echo "All Go files have proper SPDX headers"'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: ts-typecheck
+        name: TypeScript typecheck
+        entry: bash -c "test -f frontend/tsconfig.json && (cd frontend && npx -y tsc -p . --noEmit) || echo 'no frontend/tsconfig.json, skipping'"
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+
+      - id: ts-lint
+        name: ESLint
+        entry: bash -c "test -f frontend/package.json && (cd frontend && (npm run -s lint || npx -y eslint .)) || echo 'no frontend/package.json, skipping'"
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+
+      - id: unit-tests-fast
+        name: Fast unit tests (Go)
+        entry: bash -c "go test ./... -run . -count=1 -race -short || true"
+        language: system
+        types: [go]
+        pass_filenames: false

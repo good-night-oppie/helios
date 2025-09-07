@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: 2025 Good Night Oppie
+# SPDX-License-Identifier: MIT
+
+# Unified golangci-lint configuration for CI and pre-commit hooks
+# Optimized for performance on self-hosted runners
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  
+  # Go version
+  go: '1.23'
+  
+  # Include test files
+  tests: true
+  
+  # Skip vendor, third_party, testdata, examples, .git
+  skip-dirs-use-default: true
+  
+  # Build tags
+  build-tags:
+    - integration
+  
+  # Modules download mode
+  modules-download-mode: readonly
+  
+  # Allow parallel runners
+  allow-parallel-runners: true
+
+output:
+  # Format of output
+  formats:
+    - format: colored-line-number
+      path: stdout
+    - format: checkstyle
+      path: golangci-report.xml
+  
+  # Print lines of code with issue
+  print-issued-lines: true
+  
+  # Print linter name in the end of issue text
+  print-linter-name: true
+  
+  # Make output unique by line
+  uniq-by-line: true
+  
+  # Sort results
+  sort-results: true
+
+linters:
+  # Disable all linters then enable specific ones
+  disable-all: true
+  enable:
+    # Essential for code quality
+    - gofmt          # Checks whether code was gofmt-ed
+    - goimports      # Checks missing or unused imports
+    - govet          # Reports suspicious constructs
+    - errcheck       # Checks unchecked errors
+    - staticcheck    # Static analysis (replaces megacheck)
+    - ineffassign    # Detects unused assignments
+    - typecheck      # Type checking
+    
+    # Code quality
+    - gosimple       # Simplifies code
+    - unused         # Checks unused constants, variables, functions
+    - misspell       # Finds misspelled English words
+    - unconvert      # Unnecessary type conversions
+    
+    # Performance
+    - prealloc       # Find slice declarations that could be preallocated
+    - gocritic       # Opinionated linter with many checks
+    
+    # Security
+    - gosec          # Security issues
+    
+    # Style (keep minimal for speed)
+    - gocyclo        # Cyclomatic complexity
+    - dupl           # Code duplication
+    
+  # Enable these for stricter checks (slower)
+  # enable:
+  #   - godox        # Tool for detecting TODO/BUG/FIXME comments
+  #   - bodyclose    # Checks HTTP response body is closed
+  #   - noctx        # Finds send HTTP request without context.Context
+  #   - rowserrcheck # Checks rows.Err() is checked
+  #   - sqlclosecheck # Checks sql.Rows/Stmt are closed
+
+linters-settings:
+  gofmt:
+    # Simplify code
+    simplify: true
+    
+  goimports:
+    # Put local imports after 3rd party
+    local-prefixes: github.com/oppiethunder,github.com/good-night-oppie
+    
+  govet:
+    # Enable all analyzers
+    enable-all: true
+    # Disable shadow checking (too many false positives)
+    disable:
+      - shadow
+      - fieldalignment  # Too pedantic
+    
+  errcheck:
+    # Check type assertions
+    check-type-assertions: true
+    # Check for ignored errors with blank identifier
+    check-blank: true
+    # Exclude functions (common ones that rarely need checking)
+    exclude-functions:
+      - io/ioutil.ReadFile
+      - io.Copy(*bytes.Buffer)
+      - io.Copy(os.Stdout)
+      
+  staticcheck:
+    # Use latest checks
+    checks: ["all", "-ST1000", "-ST1003", "-ST1016"]
+    
+  gosimple:
+    # Use latest checks
+    checks: ["all"]
+    
+  unused:
+    # Check exported fields
+    check-exported: false
+    
+  misspell:
+    # Locale for spell checking
+    locale: US
+    
+  gocritic:
+    # Enable all tags
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - commentedOutCode
+      - whyNoLint
+      
+  gosec:
+    # Security config
+    severity: medium
+    confidence: medium
+    excludes:
+      - G104  # Unhandled errors (covered by errcheck)
+      - G304  # File path provided as taint input
+      
+  gocyclo:
+    # Max complexity
+    min-complexity: 15
+    
+  dupl:
+    # Tokens threshold
+    threshold: 100
+
+issues:
+  # Maximum issues count per one linter
+  max-issues-per-linter: 50
+  
+  # Maximum count of issues with the same text
+  max-same-issues: 10
+  
+  # Show only new issues for faster CI
+  new: false
+  
+  # Exclude patterns
+  exclude-rules:
+    # Exclude test files from some linters
+    - path: _test\.go
+      linters:
+        - dupl
+        - gosec
+        - gocyclo
+        
+    # Exclude generated files
+    - path: _gen\.go
+      linters:
+        - gofmt
+        - goimports
+        
+    # Exclude vendor
+    - path: vendor/
+      linters:
+        - typecheck
+        - unused
+        
+    # Allow TODO/FIXME in specific files
+    - path: "cmd/"
+      text: "TODO|FIXME"
+      
+  # Exclude known issues
+  exclude:
+    # Default excludes
+    - "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*print(f|ln)?|os\\.(Un)?Setenv). is not checked"
+    - "exported (type|method|function) (.+) should have comment or be unexported"
+    - "ST1000: at least one file in a package should have a package comment"
+
+# Severity rules
+severity:
+  default-severity: warning
+  rules:
+    - linters:
+        - gosec
+      severity: error
+    - linters:
+        - dupl
+      severity: info
