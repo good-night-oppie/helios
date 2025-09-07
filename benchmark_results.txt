@@ -1,8 +1,0 @@
-goos: linux
-goarch: amd64
-pkg: github.com/good-night-oppie/helios-engine/pkg/helios/vst
-cpu: AMD EPYC-Milan Processor
-BenchmarkCommitAndRead-8      	   69132	    185879 ns/op
-BenchmarkMaterializeSmall-8   	    2833	   4339955 ns/op
-PASS
-ok  	github.com/good-night-oppie/helios-engine/pkg/helios/vst	37.588s

@@ -1,0 +1,135 @@
+{
+  "version": "2.0",
+  "hooks": {
+    "post-bash-command": [
+      {
+        "name": "CI Monitor - Git Push",
+        "description": "Ultra-fast CI monitoring after git push",
+        "enabled": true,
+        "priority": 1,
+        "trigger": {
+          "patterns": [
+            "^git push",
+            "^git push.*origin"
+          ],
+          "excludePatterns": [
+            "--dry-run",
+            "--help",
+            "-n"
+          ]
+        },
+        "action": {
+          "type": "async-script",
+          "script": "/home/dev/workspace/oppie-thunder/.claude/hooks/ci-monitor-optimized.sh",
+          "args": ["background"],
+          "timeout": 1,
+          "background": true,
+          "cacheTTL": 30
+        },
+        "performance": {
+          "maxExecutionTime": 1000,
+          "cacheResults": true,
+          "debounceMs": 500
+        }
+      },
+      {
+        "name": "CI Quick Check",
+        "description": "Instant CI status check",
+        "enabled": true,
+        "priority": 2,
+        "trigger": {
+          "patterns": [
+            "^gh pr checks",
+            "^gh run list",
+            "^gh run view"
+          ]
+        },
+        "action": {
+          "type": "inline",
+          "command": "echo '⚡ Quick CI Status:' && /home/dev/workspace/oppie-thunder/.claude/hooks/ci-monitor-optimized.sh quick",
+          "timeout": 2
+        }
+      }
+    ],
+    "on-ci-failure": [
+      {
+        "name": "Auto-Fix CI Failures",
+        "description": "Immediate auto-fix attempt for CI failures",
+        "enabled": true,
+        "priority": 1,
+        "trigger": {
+          "events": ["ci-failure", "workflow-failure"],
+          "conditions": {
+            "branch": "^(feat|fix|chore)/.*",
+            "maxRetries": 3
+          }
+        },
+        "action": {
+          "type": "async-script",
+          "script": "/home/dev/workspace/oppie-thunder/.claude/hooks/ci-monitor-optimized.sh",
+          "args": ["autofix"],
+          "timeout": 30,
+          "retryOnFailure": true,
+          "retryDelay": 5000
+        },
+        "notifications": {
+          "onStart": "🔧 Attempting CI auto-fix...",
+          "onSuccess": "✅ CI fixed successfully!",
+          "onFailure": "⚠️ Manual intervention required"
+        }
+      }
+    ],
+    "periodic": [
+      {
+        "name": "CI Cache Cleanup",
+        "description": "Clean stale CI cache entries",
+        "enabled": true,
+        "schedule": "*/30 * * * *",
+        "action": {
+          "type": "script",
+          "script": "/home/dev/workspace/oppie-thunder/.claude/hooks/ci-monitor-optimized.sh",
+          "args": ["clean"],
+          "silent": true
+        }
+      }
+    ]
+  },
+  "performance": {
+    "enableCaching": true,
+    "cacheDirectory": "/tmp/ci-monitor-cache",
+    "maxCacheSize": "50MB",
+    "cacheTTL": 30,
+    "parallelExecution": true,
+    "maxParallelHooks": 3,
+    "debounceDelay": 500,
+    "asyncByDefault": true
+  },
+  "monitoring": {
+    "enableMetrics": true,
+    "metricsFile": "/tmp/ci-monitor-metrics.json",
+    "trackExecutionTime": true,
+    "trackCacheHits": true,
+    "alertThresholds": {
+      "executionTime": 2000,
+      "failureRate": 0.2
+    }
+  },
+  "optimization": {
+    "lazyLoading": true,
+    "preloadPatterns": [
+      "^git push",
+      "^gh pr"
+    ],
+    "batchAPIRequests": true,
+    "useWebhooks": false,
+    "compressionEnabled": true
+  },
+  "errorHandling": {
+    "gracefulDegradation": true,
+    "fallbackToManual": true,
+    "logErrors": true,
+    "errorLogPath": "/tmp/ci-monitor-errors.log",
+    "maxRetries": 3,
+    "retryBackoff": "exponential"
+  }
+}

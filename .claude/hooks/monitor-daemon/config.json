@@ -1,0 +1,25 @@
+{
+  "owner": "good-night-oppie",
+  "repo": "oppie-thunder",
+  "check_interval": "2m",
+  "cache_dir": "/tmp/monitor-cache",
+  "state_dir": "/tmp/monitor-state",
+  "log_file": "/tmp/monitor-daemon.log",
+  "max_retries": 3,
+  "enable_pr_monitor": true,
+  "enable_ci_monitor": true,
+  "enable_debate": true,
+  "debug_mode": false,
+  "features": {
+    "auto_fix_ci": true,
+    "auto_respond_reviews": true,
+    "track_complexity": true,
+    "generate_evidence": true
+  },
+  "thresholds": {
+    "debate_rounds_max": 3,
+    "complexity_threshold": 7,
+    "approval_keywords": ["APPROVED", "LGTM", "READY FOR MERGE"],
+    "critical_keywords": ["CRITICAL", "SECURITY", "BUG", "ERROR"]
+  }
+}

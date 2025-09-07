@@ -84,3 +84,10 @@ The codebase includes comprehensive testing:
 - **Policy guard tests**: Enforces user-space only constraint
 
 Test coverage is maintained at ≥85% across all packages.
+
+## License
+
+Licensed under the Apache License, Version 2.0 (same as Apache Kafka and Apache Spark).
+See [LICENSE](LICENSE) file for details.
+
+Copyright 2025 Oppie Thunder Contributors
