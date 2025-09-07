@@ -1,5 +1,6 @@
-# Claude session files
+# Claude session files and private documentation
 .claude/
+claudedocs/
 
 # Logs
 logs
