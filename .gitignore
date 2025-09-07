@@ -251,3 +251,11 @@ PRD*_OPPIE_THUNDER_ARCHITECTURE*.txt
 .tdd-guard.template.json
 .trae/
 cmd/helios-cli/.helios/
+
+# Private documentation files (should not be published)
+AGENT.md
+AGENTS.md
+CLAUDE.md
+CLAUDE_COMMANDS.md
+PRINCIPLES.md
+agents/
