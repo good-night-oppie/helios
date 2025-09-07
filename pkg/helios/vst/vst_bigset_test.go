@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestBigset_Commit_Restore_Diff_DISABLED(t *testing.T) {
-	t.Skip("Disabled due to Merkle tree computation bug with many files")
+func TestBigset_Commit_Restore_Diff(t *testing.T) {
+	t.Skip("Still investigating: Merkle tree not detecting changes in directory entries")
 	const N = 200 // Start smaller for testing
 	eng := New()
 
