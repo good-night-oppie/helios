@@ -5,11 +5,17 @@ repos:
     - id: check-yaml
     - id: end-of-file-fixer
     - id: trailing-whitespace
+    - id: check-added-large-files
+      args: ['--maxkb=1000']
+    - id: check-case-conflict
+    - id: check-merge-conflict
+    - id: detect-private-key
 
 - repo: https://github.com/golangci/golangci-lint
   rev: v1.57.2
   hooks:
     - id: golangci-lint
+      args: [--config=.golangci.yml]
 
 - repo: local
   hooks:
@@ -23,3 +29,21 @@ repos:
       entry: bash -c '/usr/local/go/bin/go test -short -race ./...'
       language: system
       pass_filenames: false
+    - id: go-coverage-check
+      name: go coverage check
+      entry: bash -c 'make cover-check-go'
+      language: system
+      pass_filenames: false
+      stages: [commit]
+    - id: spdx-headers-check
+      name: SPDX headers check
+      entry: bash -c 'make reuse-lint || echo "SPDX headers missing - run make reuse-add"'
+      language: system
+      pass_filenames: false
+      stages: [commit]
+    - id: research-tdd-validation
+      name: Research-TDD workflow validation
+      entry: scripts/validate-tdd-workflow.sh
+      language: system
+      pass_filenames: false
+      stages: [commit]

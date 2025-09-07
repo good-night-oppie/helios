@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2025 Good Night Oppie
+# SPDX-License-Identifier: MIT
+
+# FAST golangci-lint config for pre-commit hooks
+# Optimized for sub-second execution
+
+run:
+  timeout: 30s  # Fast timeout
+  go: '1.23'
+  tests: false  # Skip test files for speed
+  skip-dirs-use-default: true
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+  concurrency: 4  # Use multiple cores
+
+output:
+  formats:
+    - format: colored-line-number
+      path: stdout
+  print-issued-lines: false  # Skip for speed
+  print-linter-name: false
+  uniq-by-line: true
+
+linters:
+  # Only ESSENTIAL fast linters
+  disable-all: true
+  enable:
+    - gofmt      # Super fast - formatting
+    - govet      # Fast - basic issues  
+    - ineffassign # Fast - unused assignments
+    - typecheck  # Fast - compilation errors
+    
+  # These are SLOW - never enable in pre-commit:
+  # - staticcheck (3-5s)
+  # - unused (2-4s)
+  # - gosec (2-3s)
+  # - gocritic (1-2s)
+
+linters-settings:
+  gofmt:
+    simplify: true
+    
+  govet:
+    enable-all: false  # Only basic checks
+    enable:
+      - atomic
+      - bools
+      - buildtag
+      - nilfunc
+      - printf
+    
+issues:
+  max-issues-per-linter: 0  # No limit
+  max-same-issues: 0  # No limit
+  new: true  # Only check changed files
+  fix: false  # Don't auto-fix
+  
+  exclude-use-default: true
+  exclude-case-sensitive: false
+  
+  # Speed optimizations
+  whole-files: false  # Only check changed lines
+  
+severity:
+  default-severity: error  # Only report serious issues

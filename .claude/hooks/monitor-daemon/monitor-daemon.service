@@ -1,0 +1,17 @@
+[Unit]
+Description=Oppie Thunder CI/PR Monitor Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=/home/dev/workspace/oppie-thunder
+Environment="GITHUB_TOKEN=%GITHUB_TOKEN%"
+ExecStart=/home/dev/workspace/oppie-thunder/.claude/hooks/monitor-daemon/monitor-daemon
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/monitor-daemon.log
+StandardError=append:/var/log/monitor-daemon.error.log
+
+[Install]
+WantedBy=multi-user.target
