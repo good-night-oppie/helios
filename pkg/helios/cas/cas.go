@@ -1,4 +1,18 @@
-// SPDX-License-Identifier: MIT
+// Copyright 2025 Oppie Thunder Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// SPDX-License-Identifier: Apache-2.0
 
 package cas
 
@@ -55,6 +69,7 @@ type BLAKE3Store struct {
 	// Ultra-performance optimizations for <70μs VST targets
 	memoryMode  bool              // Skip disk I/O for maximum performance
 	writeQueue  chan writeOp      // Async write queue for background persistence
+	errorQueue  chan error        // Channel for background write errors
 	wg          sync.WaitGroup    // Wait group for background writes
 	closed      bool              // Track if store is closed
 	closeMutex  sync.Mutex        // Protects close operations
@@ -74,6 +89,7 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 		keyCache:   make(map[string]string),
 		memoryMode: false, // Default to persistent mode
 		writeQueue: make(chan writeOp, 1000), // Buffered channel for async writes
+		errorQueue: make(chan error, 100),    // Buffered channel for errors
 	}
 	
 	// Initialize hasher pool for zero-allocation hashing
@@ -86,6 +102,9 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 	// Start background writer goroutine
 	go store.backgroundWriter()
 	
+	// Start error handler goroutine
+	go store.errorHandler()
+	
 	return store, nil
 }
 
@@ -93,10 +112,24 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 func (s *BLAKE3Store) backgroundWriter() {
 	for writeOp := range s.writeQueue {
 		if err := os.WriteFile(writeOp.filePath, writeOp.content, 0644); err != nil {
-			// In a production system, we'd log this error
-			// For now, continue processing other writes
+			// Send error to error handler for logging/retry
+			select {
+			case s.errorQueue <- fmt.Errorf("background write failed for %s: %w", writeOp.filePath, err):
+			default:
+				// Error queue full, error will be dropped but write continues
+			}
 		}
 		s.wg.Done()
+	}
+}
+
+// errorHandler processes background write errors
+func (s *BLAKE3Store) errorHandler() {
+	for err := range s.errorQueue {
+		// In production, this would log to a proper logging system
+		// For now, we'll use fmt.Printf to avoid external dependencies
+		fmt.Printf("BLAKE3Store background write error: %v\n", err)
+		// Future: implement retry logic, metrics, or alerts here
 	}
 }
 
@@ -107,6 +140,10 @@ func (s *BLAKE3Store) EnableMemoryMode() {
 
 // Store saves content and returns its BLAKE3 hash
 func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
+	// Quick check if store is closed (avoid lock for performance)
+	if s.closed {
+		return types.Hash{}, fmt.Errorf("store is closed")
+	}
 	// Get hasher from pool for zero allocation
 	hasher := s.hasherPool.Get().(*blake3.Hasher)
 	defer func() {
@@ -123,7 +160,7 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 		Digest:    digest,
 	}
 
-	// Pre-compute hash key once
+	// Pre-compute hash key once (use hex digest as key)
 	hashKey := fmt.Sprintf("%x", digest)
 	
 	// Check if already exists to avoid duplicate work
@@ -150,13 +187,12 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 		filePath := filepath.Join(s.storePath, hashKey)
 		
 		// Use async writes for better performance
-		s.wg.Add(1)
 		select {
 		case s.writeQueue <- writeOp{filePath: filePath, content: content}:
 			// Successfully queued for background write
+			s.wg.Add(1)
 		default:
 			// Queue full, write synchronously as fallback
-			s.wg.Done()
 			if err := os.WriteFile(filePath, content, 0644); err != nil {
 				return hash, fmt.Errorf("failed to write content to disk: %w", err)
 			}
@@ -214,13 +250,12 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 		// Queue all writes together for better batching
 		for i, content := range contents {
 			filePath := filepath.Join(s.storePath, hashKeys[i])
-			s.wg.Add(1)
 			select {
 			case s.writeQueue <- writeOp{filePath: filePath, content: content}:
 				// Successfully queued
+				s.wg.Add(1)
 			default:
 				// Fallback to sync write
-				s.wg.Done()
 				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
 			}
 		}
@@ -324,12 +359,17 @@ func (s *BLAKE3Store) Close() error {
 		return nil
 	}
 	
+	// Mark as closed first to prevent new operations
+	s.closed = true
+	
+	// Close the write queue to signal background workers
+	close(s.writeQueue)
+	
 	// Wait for background writes to complete
 	s.wg.Wait()
 	
-	// Close the write queue
-	close(s.writeQueue)
-	s.closed = true
+	// Close error queue
+	close(s.errorQueue)
 	
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
