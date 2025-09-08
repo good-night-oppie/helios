@@ -11,7 +11,7 @@
 
 ```bash
 # Install
-curl -sSL https://install.oppie.xyz | sh
+curl -sSL https://raw.githubusercontent.com/good-night-oppie/helios/master/scripts/install.sh | sh
 
 # Use with existing project
 cd my-project
@@ -30,7 +30,7 @@ helios commit --work .  # Fast commit of current directory
 
 ```bash
 # Install Helios
-curl -sSL https://install.oppie.xyz | sh
+curl -sSL https://raw.githubusercontent.com/good-night-oppie/helios/master/scripts/install.sh | sh
 
 # Basic usage (v0.0.1 commands)
 cd your-ai-project/
@@ -180,7 +180,7 @@ This is an alpha release with core functionality:
 
 ```bash
 # Install 
-curl -sSL https://install.oppie.xyz | sh
+curl -sSL https://raw.githubusercontent.com/good-night-oppie/helios/master/scripts/install.sh | sh
 
 # Use in existing project
 cd your-ai-project/
