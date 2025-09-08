@@ -11,15 +11,12 @@
 
 ```bash
 # Install
-curl -sSL install.helios.dev | sh
+curl -sSL https://install.oppie.xyz | sh
 
-# Initialize (Git-compatible)
-helios init my-project
+# Use with existing project
 cd my-project
-
-# Use like Git but faster
 echo "print('hello')" > test.py
-helios commit -m "AI generated function"  # ~70μs vs Git's ~10ms
+helios commit --work .  # Fast commit of current directory
 ```
 
 ## How It Works
@@ -33,29 +30,25 @@ helios commit -m "AI generated function"  # ~70μs vs Git's ~10ms
 
 ```bash
 # Install Helios
-curl -L https://github.com/good-night-oppie/oppie-helios-engine/releases/latest/helios | sh
+curl -sSL https://install.oppie.xyz | sh
 
-# Convert existing project (or start fresh)
+# Basic usage (v0.0.1 commands)
 cd your-ai-project/
-helios init  # Creates .helios/ directory alongside .git/
 
-# Use familiar Git commands
-helios add .
-helios commit -m "AI experiment #1"
-helios branch test-oauth-approach
-helios checkout test-oauth-approach
+# Commit current working directory
+helios commit --work .
 
-# Test the speed difference
-time git commit -m "test" --allow-empty    # ~10-50ms
-time helios commit -m "test"                # ~0.17ms
+# View statistics
+helios stats
 
-# Real AI workflow example
-for i in {1..100}; do
-  # Your AI generates code variant
-  echo "def approach_$i(): return $i" > solution.py
-  helios commit -m "AI iteration $i"        # <1ms each
-done
-# 100 commits in ~0.3 seconds vs ~5+ seconds with Git
+# Restore to a specific snapshot
+helios restore --id <snapshotID>
+
+# Compare snapshots
+helios diff --from <id1> --to <id2>
+
+# Extract files from snapshot
+helios materialize --id <snapshotID> --out /path/to/output
 ```
 
 ## Real AI Coding Agent Use Cases
@@ -132,9 +125,6 @@ Traditional Git                    Helios Content-Addressable
 import subprocess
 import openai
 
-# Initialize Helios in your AI project
-subprocess.run(["helios", "init"])
-
 for experiment in range(100):
     # Generate code with your AI
     response = openai.ChatCompletion.create(
@@ -145,12 +135,17 @@ for experiment in range(100):
     # Save and version instantly (<1ms)
     with open("solution.py", "w") as f:
         f.write(response.choices[0].message.content)
-    subprocess.run(["helios", "commit", "-m", f"AI attempt {experiment}"])
+    
+    # Commit current state
+    result = subprocess.run(["helios", "commit", "--work", "."], capture_output=True)
+    snapshot_id = result.stdout.decode().strip()
     
     # Test the code
     if not run_tests():
-        # Instant rollback (<0.1ms)  
-        subprocess.run(["helios", "reset", "--hard", "HEAD~1"])
+        # Rollback to previous working state
+        subprocess.run(["helios", "restore", "--id", previous_snapshot_id])
+    else:
+        previous_snapshot_id = snapshot_id  # Save working state
 ```
 
 **Popular integrations:**
@@ -165,36 +160,35 @@ for experiment in range(100):
 - **Memory**: 1GB minimum (scales with repository size)
 - **Dependencies**: None - single binary
 
-## Migration from Git
+## Current v0.0.1 Limitations
 
-```bash
-# Import existing Git repository (preserves full history)
-helios import --from-git /path/to/git/repo
+This is an alpha release with core functionality:
 
-# Use both systems during transition
-cd my-project/
-helios commit -m "AI experiment"     # Use Helios for AI workflows
-git commit -m "Human changes"        # Use Git for team collaboration  
+**What works:**
+- Fast commits with `helios commit --work <path>`
+- Snapshot restoration with `helios restore --id <id>`
+- Diff comparison with `helios diff --from <id> --to <id>`
+- File extraction with `helios materialize`
 
-# Export back to Git if needed
-helios export --to-git /path/to/output
-```
+**Coming in future versions:**
+- Git import/export functionality
+- `init`, `add`, `branch`, `checkout` commands
+- Git-compatible command syntax
+- Performance optimizations targeting <70μs commits
 
 ## Installation
 
 ```bash
 # Install 
-curl -L https://github.com/good-night-oppie/oppie-helios-engine/releases/latest/helios | sh
+curl -sSL https://install.oppie.xyz | sh
 
-# Initialize in existing project
+# Use in existing project
 cd your-ai-project/
-helios init
-helios add .
-helios commit -m "Initial baseline"
+helios commit --work .  # Commit current directory state
 
-# Performance comparison
+# Performance comparison (alpha - optimization ongoing)
 time git commit --allow-empty -m "test"    # ~20ms
-time helios commit -m "test"               # ~0.2ms
+time helios commit --work .                 # Current: ~1-5ms, Target: <1ms
 ```
 
 ## Technical Details
@@ -203,5 +197,5 @@ See [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md) for implementation details.
 
 ## Issues & Support
 
-- **Issues**: [GitHub Issues](https://github.com/good-night-oppie/oppie-helios-engine/issues)
+- **Issues**: [GitHub Issues](https://github.com/good-night-oppie/helios/issues)
 - **Status**: Alpha release

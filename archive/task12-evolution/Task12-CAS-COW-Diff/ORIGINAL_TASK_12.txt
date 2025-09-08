@@ -1,0 +1,438 @@
+# Task 12 Implementation Plan: CAS+CoW State Management System
+
+## Executive Summary
+
+This document outlines the complete implementation plan for Task 12: building a Content-Addressable Storage (CAS) system with Copy-on-Write (CoW) snapshots for efficient MCTS state management in the oppie-thunder project.
+
+## Research Findings: Mature Go Libraries
+
+Based on deep research conducted on existing Go libraries:
+
+### Production-Ready Libraries We Will Use
+
+1. **[hashicorp/golang-lru](https://github.com/hashicorp/golang-lru)** 
+   - Thread-safe, fixed-size LRU cache
+   - Mature, widely used in production
+   - Perfect for our hot-path caching needs
+
+2. **[BadgerDB](https://github.com/dgraph-io/badger)**
+   - High-performance embedded key-value store
+   - Built-in snapshots and compression
+   - Production-ready alternative to BoltDB
+
+3. **[klauspost/compress](https://github.com/klauspost/compress)**
+   - Optimized compression algorithms (LZ4, Zstd)
+   - Significantly faster than standard library
+   - Used by major projects
+
+4. **[jotfs/fastcdc-go](https://github.com/jotfs/fastcdc-go)**
+   - Fast content-defined chunking
+   - Essential for deduplication
+   - Production-ready implementation
+
+5. **crypto/sha256** (Go standard library)
+   - Industry-standard hashing
+   - Hardware acceleration support
+   - No external dependencies
+
+### Custom Implementations Required
+
+- **OverlayFS Integration**: No mature Go bindings exist; will use syscalls directly
+- **In-Memory COW**: Custom implementation for cross-platform support
+- **Merkle Tree**: No production-ready Go library found; will implement from scratch
+
+## Architecture Overview
+
+```
+backend/internal/cascow/
+├── cas/                    # Content-Addressable Storage
+│   ├── hash.go            # ContentHash type and SHA-256 hashing
+│   ├── hash_test.go       # Hash function tests
+│   ├── store.go           # ObjectStore interface
+│   ├── store_test.go      # Store operations tests
+│   ├── filesystem_store.go # Filesystem-based implementation
+│   ├── badger_store.go    # BadgerDB-based implementation
+│   ├── dedup.go           # Deduplication with fastcdc
+│   └── dedup_test.go      # Deduplication tests
+├── cow/                    # Copy-on-Write layer
+│   ├── snapshot.go        # Snapshot interface
+│   ├── snapshot_test.go   # Snapshot tests
+│   ├── overlay_linux.go   # OverlayFS integration (Linux)
+│   ├── memory_cow.go      # In-memory COW (cross-platform)
+│   └── memory_cow_test.go # Memory COW tests
+├── merkle/                 # Merkle tree verification
+│   ├── tree.go            # Merkle tree implementation
+│   ├── tree_test.go       # Tree operations tests
+│   └── proof.go           # Proof generation/verification
+├── state/                  # MCTS state management
+│   ├── manager.go         # High-level state API
+│   ├── manager_test.go    # Manager integration tests
+│   ├── cache.go           # LRU + hot-path caching
+│   ├── gc.go              # Garbage collection
+│   └── gc_test.go         # GC tests
+└── benchmarks/
+    └── bench_test.go      # Performance benchmarks
+```
+
+## Implementation Phases (Task 12 Subtasks)
+
+### Phase 1: Task 12.1 - Design CAS Storage Interface (Day 1-2)
+
+**Objective**: Define core interfaces and data structures
+
+**Key Components**:
+```go
+// ContentHash represents SHA-256 hash of content
+type ContentHash struct {
+    value [32]byte
+}
+
+// ObjectStore defines CAS operations
+type ObjectStore interface {
+    Put(ctx context.Context, data []byte) (ContentHash, error)
+    Get(ctx context.Context, hash ContentHash) ([]byte, error)
+    Exists(ctx context.Context, hash ContentHash) (bool, error)
+    Delete(ctx context.Context, hash ContentHash) error
+}
+```
+
+**TDD Tests to Write First**:
+- Hash consistency tests
+- Hash uniqueness tests
+- Path generation tests
+- Interface contract tests
+
+**Success Criteria**:
+- 100% test coverage for interfaces
+- All tests passing
+- Clean API design
+
+### Phase 2: Task 12.2 - Implement Core CAS Engine (Day 3-4)
+
+**Objective**: Build storage engine with deduplication
+
+**Dual Backend Strategy**:
+1. **FilesystemStore**: Simple file-based storage
+   - Hierarchical directory structure (objects/xx/yy/hash)
+   - Atomic writes (temp → rename)
+   - Direct file I/O
+
+2. **BadgerStore**: Production database backend
+   - Built-in compression
+   - Snapshot support
+   - Better performance for large datasets
+
+**Deduplication with fastcdc-go**:
+```go
+import "github.com/jotfs/fastcdc-go"
+
+func (d *Deduplicator) Deduplicate(data []byte) []ContentHash {
+    chunker := fastcdc.NewChunker(bytes.NewReader(data), fastcdc.Options{
+        MinSize: 2048,
+        AvgSize: 4096,
+        MaxSize: 8192,
+    })
+    // Process chunks with reference counting
+}
+```
+
+**Success Criteria**:
+- ≥90% test coverage
+- Deduplication efficiency >80%
+- Concurrent access safety verified
+
+### Phase 3: Task 12.3 - Implement COW Snapshot System (Day 5-6)
+
+**Objective**: Build zero-cost snapshot mechanism
+
+**Dual Implementation**:
+
+1. **Linux OverlayFS (Primary)**:
+   - Direct syscall integration
+   - Kernel-level performance
+   - Sub-millisecond snapshots
+
+2. **In-Memory COW (Fallback)**:
+   - Cross-platform compatibility
+   - Delta tracking
+   - Whiteout markers for deletions
+
+**Key Operations**:
+- Create(): New snapshot
+- Fork(): Create child snapshot
+- Merge(): Combine snapshots
+- Diff(): Compare snapshots
+
+**Success Criteria**:
+- Snapshot creation <10ms
+- Memory overhead <100 bytes/snapshot
+- Cross-platform tests passing
+
+### Phase 4: Task 12.4 - MCTS State Management Integration (Day 7-8)
+
+**Objective**: MCTS-specific state management APIs
+
+**State Manager API**:
+```go
+type StateManager interface {
+    CreateNode(parentSnapshot Snapshot) (Snapshot, error)
+    BacktrackTo(snapshot Snapshot) error
+    GetStateDiff(snap1, snap2 Snapshot) ([]Change, error)
+    PruneUnreachableStates() error
+}
+```
+
+**Cache Implementation with hashicorp/golang-lru**:
+```go
+import lru "github.com/hashicorp/golang-lru/v2"
+
+type StateCache struct {
+    lru *lru.Cache[ContentHash, []byte]  // Recent states
+    hot sync.Map                         // Lock-free hot entries
+    stats CacheStats                     // Hit/miss metrics
+}
+```
+
+**Garbage Collection**:
+- Mark-and-sweep algorithm
+- Reference counting
+- Grace period for recent states
+
+**Success Criteria**:
+- State switches <10ms (P95)
+- Cache hit rate >80%
+- No memory leaks under stress
+
+### Phase 5: Task 12.5 - Performance Optimization (Day 9-10)
+
+**Objective**: Achieve production performance targets
+
+**Optimization Strategies**:
+
+1. **Compression with klauspost/compress**:
+```go
+import "github.com/klauspost/compress/zstd"
+
+encoder, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+compressed := encoder.EncodeAll(data, nil)
+```
+
+2. **Parallel Hash Computation**:
+   - Worker pool pattern
+   - CPU count based parallelism
+   - SIMD optimizations where available
+
+3. **Memory Optimizations**:
+   - Object pooling with sync.Pool
+   - Memory-mapped files for large objects
+   - Ring buffers for streaming
+
+**Performance Targets**:
+| Metric | Target | Measurement Method |
+|--------|--------|-------------------|
+| Hash Throughput | >500 MB/s | Benchmark 10MB blocks |
+| State Switch | <10ms (P95) | 1000 state switches |
+| Deduplication | >80% | Similar state variations |
+| Concurrent Ops | >10k/sec | 100 goroutines |
+| Memory/State | <100 bytes | Metadata overhead |
+
+### Phase 6: Task 12.6 - Comprehensive Testing Suite (Day 11-12)
+
+**Objective**: Ensure production readiness
+
+**Test Categories**:
+
+1. **Unit Tests** (≥85% coverage):
+   - Table-driven tests for all operations
+   - Edge cases and error conditions
+   - Concurrent access patterns
+
+2. **Integration Tests**:
+   - Multi-process scenarios
+   - Crash recovery
+   - Large state trees
+
+3. **Property-Based Tests**:
+```go
+import "testing/quick"
+
+func TestInvariants(t *testing.T) {
+    quick.Check(func(ops []StateOp) bool {
+        // Apply operations
+        return verifyIntegrity() && 
+               verifyAtomicity() &&
+               verifyConsistency()
+    }, nil)
+}
+```
+
+4. **Performance Benchmarks**:
+   - Microbenchmarks per operation
+   - End-to-end latency
+   - Memory profiling
+   - CPU profiling
+
+**Success Criteria**:
+- All tests passing
+- Coverage targets met
+- Performance targets achieved
+- No race conditions detected
+
+## TDD Methodology
+
+### Red-Green-Refactor Cycle
+
+1. **Red Phase**:
+   - Write failing test defining expected behavior
+   - Define performance targets in tests
+   - Create test fixtures and golden samples
+
+2. **Green Phase**:
+   - Write minimal code to pass tests
+   - Focus on correctness, not optimization
+   - Verify all tests pass
+
+3. **Refactor Phase**:
+   - Optimize performance
+   - Improve code structure
+   - Maintain test coverage
+
+### Test Patterns
+
+```go
+// Table-driven test pattern (from TDD_GUIDE.md)
+type TestCase[I any, O any] struct {
+    Name     string
+    Input    I
+    Want     O
+    WantErr  error
+    Setup    func(t *testing.T)
+    Teardown func(t *testing.T)
+}
+
+func TestContentHash(t *testing.T) {
+    tests := []TestCase[[]byte, string]{
+        {
+            Name:  "empty",
+            Input: []byte{},
+            Want:  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        },
+        // More test cases...
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.Name, func(t *testing.T) {
+            // Test implementation
+        })
+    }
+}
+```
+
+## Risk Analysis & Mitigation
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| OverlayFS unavailable | High | In-memory COW fallback |
+| Memory exhaustion | High | BadgerDB with disk persistence |
+| GC pauses | Medium | Object pooling, minimal allocations |
+| Hash collisions | Low | SHA-256 provides 2^256 space |
+| Filesystem limits | Medium | Hierarchical storage structure |
+| Concurrent bugs | High | Extensive race testing |
+
+## CI/CD Integration
+
+### Makefile Targets
+```makefile
+test-cascow:
+	cd backend && go test ./internal/cascow/... -race -coverprofile=cascow.coverage
+
+bench-cascow:
+	cd backend && go test ./internal/cascow/benchmarks -bench=. -benchmem
+
+cover-cascow:
+	cd backend && go tool cover -html=cascow.coverage
+```
+
+### GitHub Actions Workflow
+- Run tests on every PR
+- Enforce coverage thresholds
+- Run benchmarks and compare performance
+- Security scanning with gosec
+- License compliance with REUSE
+
+## Deliverables
+
+1. **Source Code**: Complete CAS+CoW implementation in `backend/internal/cascow/`
+2. **Test Suite**: Comprehensive tests with ≥85% coverage
+3. **Benchmarks**: Performance validation suite
+4. **Documentation**: API documentation and usage examples
+5. **Integration**: Working integration with MCTS engine
+
+## Success Metrics
+
+- [ ] All 6 subtasks completed
+- [ ] Test coverage ≥85% (100% for core)
+- [ ] Performance targets achieved
+- [ ] CI/CD pipeline passing
+- [ ] Code review approved
+- [ ] Integration tests passing
+
+## Timeline
+
+| Week | Phase | Deliverable |
+|------|-------|-------------|
+| 1 | Core CAS | Interfaces, hash, basic store |
+| 1-2 | COW Snapshots | OverlayFS, memory fallback |
+| 2 | MCTS Integration | State manager, cache, GC |
+| 2-3 | Optimization | Performance tuning |
+| 3 | Testing & Hardening | Full test suite, benchmarks |
+
+## Implementation Notes from Design Documents
+
+### From cas-cow-design.md
+
+**Key Technical Decisions**:
+- SHA-256 for content addressing (industry standard, hardware acceleration)
+- Hierarchical storage: objects/xx/yy/hash format
+- Two-phase atomic writes: temp file → compute hash → atomic rename
+- Dual COW strategy: OverlayFS (Linux) + Memory fallback (cross-platform)
+- Binary Merkle tree for simplicity
+- Content-defined chunking with 4KB average chunk size
+
+**Critical Code Patterns**:
+1. Atomic writes ensure consistency under concurrent access
+2. Hierarchical storage prevents filesystem directory limits
+3. Lock-free hot cache using sync.Map for performance
+4. Mark-and-sweep GC with grace period for recent objects
+
+### From cas-cow-analysis.md
+
+**Performance Benchmarks from Research**:
+- Git: 550 MB/s hash, 5ms snapshot, 60-70% dedup
+- IPFS: 480 MB/s hash, 12ms snapshot, 75-85% dedup
+- ZFS: <1ms snapshot, 80-90% dedup
+- OverlayFS: 2ms snapshot, kernel-level performance
+
+**Optimization Insights**:
+- BLAKE3 is 3x faster than SHA-256 but less standard
+- FastCDC provides better deduplication than fixed-size chunks
+- Memory-mapped files optimal for objects >1MB
+- Object pooling critical to reduce GC pressure
+
+## Next Steps
+
+1. Begin TDD implementation starting with Task 12.1
+2. Create directory structure
+3. Write first failing tests for ContentHash type
+4. Implement minimal code to pass tests
+5. Continue Red-Green-Refactor cycle
+6. Run `make test-go cover-check-go` to verify coverage
+7. Execute `scripts/tdd-guard.sh --wait` for CI validation
+
+## Notes
+
+- This implementation follows clean room principles from TDD_GUIDE.md and AGENT_GUIDE.md
+- All code will include SPDX-License-Identifier: MIT headers
+- Tests will be written before implementation (Red → Green → Refactor)
+- Performance targets are based on research in cas-cow-analysis.md
+- Library choices validated through deep research of Go ecosystem

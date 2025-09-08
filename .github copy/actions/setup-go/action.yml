@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: 2025 Good Night Oppie
+# SPDX-License-Identifier: MIT
+
+name: 'Setup Go Environment'
+description: 'Setup Go with caching and common tools for CI'
+inputs:
+  go-version:
+    description: 'Go version to use'
+    required: false
+    default: '1.23.x'
+  install-tools:
+    description: 'Install linting and security tools'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: true
+        cache-dependency-path: |
+          go.sum
+          backend/go.sum
+          
+    - name: Setup cache paths
+      shell: bash
+      run: |
+        # Configure cache directories for self-hosted runner
+        if [[ "${{ runner.name }}" == *"ai-runner"* ]] || [[ "${{ runner.name }}" == *"self-hosted"* ]]; then
+          echo "GOCACHE=/opt/runner-cache/go-build" >> $GITHUB_ENV
+          echo "GOMODCACHE=/opt/runner-cache/go-mod" >> $GITHUB_ENV
+          echo "GOLANGCI_LINT_CACHE=/opt/runner-cache/golangci-lint" >> $GITHUB_ENV
+          
+          # Create cache dirs if they don't exist
+          if [ ! -d "/opt/runner-cache" ]; then
+            sudo mkdir -p /opt/runner-cache/{go-build,go-mod,golangci-lint}
+            # Use actual user running the action
+            sudo chown -R $USER:$USER /opt/runner-cache
+          fi
+        fi
+        
+    - name: Install tools
+      if: inputs.install-tools == 'true'
+      shell: bash
+      run: |
+        echo "📦 Installing Go tools..."
+        
+        # Check if tools are already installed (for self-hosted runner)
+        if ! command -v golangci-lint &> /dev/null; then
+          echo "Installing golangci-lint..."
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+        else
+          echo "golangci-lint already installed: $(golangci-lint version)"
+        fi
+        
+        if ! command -v gosec &> /dev/null; then
+          echo "Installing gosec..."
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+        else
+          echo "gosec already installed"
+        fi
+        
+        # Only install these for comprehensive checks
+        if [ "${{ github.event_name }}" == "pull_request" ] || [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          if ! command -v staticcheck &> /dev/null; then
+            echo "Installing staticcheck..."
+            go install honnef.co/go/tools/cmd/staticcheck@v0.4.7
+          fi
+          
+          if ! command -v govulncheck &> /dev/null; then
+            echo "Installing govulncheck..."
+            go install golang.org/x/vuln/cmd/govulncheck@latest
+          fi
+        fi
+        
+        echo "✅ Tools ready"

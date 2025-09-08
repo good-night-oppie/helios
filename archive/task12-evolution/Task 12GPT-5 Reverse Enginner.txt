@@ -1,0 +1,157 @@
+下面这份评审直截了当：先给判断，再讲证据，最后给出一份「能落地、可验收、带指标」的完整实施计划。
+
+⸻
+
+结论先行
+
+原始 Task12 计划优点很多（库选型成熟、结构清晰、TDD/覆盖率与基准意识强），但在 MVP 范围控制与风险资源配比上失衡：同时实现双后端（Filesystem+Badger）、双 COW（OverlayFS+内存）、Merkle 树与标记清除 GC，偏离了 PRD5 强调的“微虚机 + overlayfs + 秒级主循环”的最小完备路径，且把 OverlayFS 内核交互放在中段时间片，低估实现与加固难度。证据见原文档的双后端/双 COW/时间轴与基准节选。 ￼  ￼  ￼
+
+GPT-5的修订版把刀落在刀刃上：果断砍掉 FilesystemStore、In‑memory COW、Merkle、Mark‑and‑Sweep GC，把时间砸在 OverlayFS 内核交互层，并以 Manifest + 引用计数替代复杂度更高的组件；目标环境锁定 Linux 微虚机，API 以 StateManager 为唯一入口，且设定状态操作 P95<50ms的可检指标，方向与 PRD5 完全对齐。 ￼  ￼  ￼  ￼  ￼
+PRD5 明确主循环必须在热态、内存级的轻量虚机（Firecracker/gVisor/持久 Devcontainer 池）中运行、overlayfs 负责近零成本状态切换；主循环目标 <5s。你的修订版正好在这条跑道上加速。 ￼  ￼
+
+尚需补强两点（不为批判而批判，而是补齐飞轮的两颗螺丝）：
+	1.	Manifest 取代 Merkle 的完整性：需给 Manifest 增加汇总哈希/HMAC 字段，保障跨进程/崩溃恢复后的可校验性。
+	2.	引用计数的一致性：Badger 的引用计数更新需 WAL/commit‑log 保障“先日志、后生效”的崩溃一致性；commit 流程要做双相提交（临时层 fsync → 原子 rename/overlay 切换），并配合孤儿块清理定期对账。修订版已考虑混沌/kill‑9 场景，这块只需把“对账+WAL”落成代码即可。 ￼
+
+⸻
+
+原始 Task12：长处与症结
+
+长处（应保留）
+• 生态选型扎实：BadgerDB、fastcdc、klauspost、SHA‑256，都是工业级；且有 Merkle/GC/缓存的清晰分层与 TDD 纪律与覆盖率门槛。 ￼  ￼  ￼
+• 具备性能标尺意识：列出 Git/IPFS/ZFS/OverlayFS 的吞吐与快照延迟数据，为目标值提供参考边界。 ￼
+
+症结（需要收敛）
+• 双后端 + 双 COW 让实现与测试矩阵指数膨胀，超出 MVP 必要性（PRD5 只强调 overlayfs 的热切换与微虚机主循环）。 ￼  ￼  ￼
+• OverlayFS 被低估：挂载/命名空间/崩溃清理/并发写入与原子性都需要扎实的内核交互层，不是“一两天任务”。 ￼
+
+⸻
+
+GPT-5的修订版：亮点与需要加固之处
+
+三大亮点
+• 聚焦正确难点：把 OverlayFS 放到 C 位，明确它是“最高不确定性环节”，并重配工期与测试资源。 ￼
+• 删繁就简：Manifest + 引用计数的选择大幅降低实现复杂度，且更契合 MVP 节奏与运维可控性。 ￼
+• 接口与指标清晰：StateManager 三个 API 定义简洁，性能门槛直观（状态操作 P95<50ms），给后续 MCTS 预算留足余量。 ￼  ￼
+
+两处加固
+• Manifest 增加 root_digest（对全体 ContentHash 排序后做 SHA‑256/HMAC），并把该摘要随快照元数据一起持久化，替代 Merkle 的“全局可校验”。（与 PRD5 的“高性能状态管理 + 可回放”目标一致。） ￼
+• 引用计数的 WAL/commit‑log：对 CommitNode/PruneNode 的 RC 改动按“写日志→刷盘→状态切换→标记已提交”顺序执行；启动时做一次“日志回放 + Manifest 对账”，再触发孤儿块清理。 ￼
+
+⸻
+
+完整实施计划（10–12 天，可并行化，含验收标准）
+
+目标与对齐：满足 PRD5“微虚机 + overlayfs 的主循环沙箱”与“主循环 <5s、状态操作 P95<50ms”的指标；交付一个可直接接 MCTS 的状态后端与最小监控/回滚能力。 ￼  ￼
+
+架构一览（ASCII）
+
+          ┌───────────────────────────┐
+          │     MCTS Engine (Exec)    │
+          └───────────▲──────────────┘
+                      │ StateManager API
+     ┌────────────────┴────────────────┐
+     │         State Manager            │   (CreateNode / CommitNode / PruneNode)
+     └─────▲───────────┬───────────▲──┘
+           │           │           │
+     ┌─────┴───┐  ┌────┴────┐  ┌───┴─────┐
+     │ Overlay │  │ Manifest │  │ RefCnt  │
+     │  Mount  │  │  (WAL)   │  │ (Badger)│
+     └────▲────┘  └────▲─────┘  └────▲────┘
+          │            │             │
+     ┌────┴──────────────────────────┴────┐
+     │     CAS: Badger + fastcdc + LRU     │
+     └─────────────────────────────────────┘
+         (Linux microVM / overlayfs layer)
+
+Phase 0（0.5 天）环境底座
+	•	建好 微虚机池（Firecracker/gVisor/Devcontainer 二选一）和 overlayfs 基线镜像；准备非特权挂载/命名空间策略与最小权限。验收：1) 创建/合并层可用；2) 基准 mount+umount 回路正常。 ￼
+
+Phase 1（2.5 天）CAS 核心（Badger + fastcdc）
+	•	接口与数据结构（ContentHash、ObjectStore），以 BadgerStore 为唯一后端；集成 fastcdc 分块与去重；加入 LRU 热缓存。验收：并发读写正确性；去重率统计；TDD 覆盖率≥90%。 ￼  ￼
+
+Phase 2（3 天）OverlayFS 内核交互层（重兵进攻）
+	•	实现 overlay.Manager：负责 lower/upper/work/merged 的生命周期管理、原子切换与崩溃清理；双相提交（写临时层→fsync→原子 rename/切换）。
+	•	混沌注入：随机 kill -9、I/O 错误模拟；命名空间与权限回收；进程崩溃后的垃圾清理。
+	•	验收：快照创建/合并/丢弃 P95<20ms；崩溃后“无脏 mount 点”，清理脚本零误删。（OverlayFS 子毫秒～数毫秒量级的快照是可达基线。） ￼
+
+Phase 3（2 天）Manifest + 引用计数 + WAL
+	•	Manifest：记录 []ContentHash 与 root_digest（对哈希排序后整体 SHA‑256/HMAC）；
+	•	WAL：CommitNode/PruneNode 先写日志再更新 Badger 的 RC；启动时“日志回放 + 对账”；
+	•	StateManager：落地修订版的三 API（Create/Commit/Prune）与 LRU 对 Manifest 的缓存。
+	•	验收：杀进程/断电后 WAL 回放能恢复一致；孤儿块扫描能在 N 秒内收敛；接口幂等。 ￼  ￼
+
+Phase 4（2 天）端到端压测 + 加固
+	•	建立 MCTS 行为模型（“多创建、少提交、大量剪枝”），压测 StateManager 三 API 的 P50/P95/P99 与吞吐；
+	•	目标：任一状态操作 P95<50ms（为主循环 <5s 留足工位）；竞争检测与内存剖析；
+	•	混沌：循环注入错误 + 资源限流；
+	•	验收：达成指标并产出基准报告与 Grafana 快照。 ￼  ￼
+
+Phase 5（1 天）与 Oppie 集成 & 可观测性
+	•	以 PRD5 工作流接入：将状态后端挂到 MCTS 执行引擎；把每次操作写入**轨迹仓（Episode Store）**的最小表结构（Plan/Action/Obs/Reward 摘要 + SnapshotID）。
+	•	对接最小 PWA 监控：展示当前节点、分支数、最近 10 次 Create/Commit/Prune 延迟火焰条，支持“点击回滚到 SnapshotID”。
+	•	验收：在真实仓库跑一条夜间任务，第二天能在手机端看到“决策包”概览与一键回滚入口（对齐 PRD5 的 Trust‑UX/决策可视）。 ￼
+
+⸻
+
+交付物与验收门槛（Definition of Done）
+	•	代码：backend/internal/cascow/ 完整实现（CAS/overlay/manifest/rc/state），附 TDD 与基准测试；与 MCTS 的工作集成样例。（原计划结构继续沿用即可。）  ￼
+	•	覆盖率：核心模块 ≥85%，接口与关键路径 100%。 ￼
+	•	性能：状态操作 P95<50ms；夜间长跑稳定，无资源泄漏/挂载遗留。 ￼
+	•	集成：能驱动一次端到端夜间 PR 的任务链，主循环预算 <5s 目标不受阻。 ￼
+
+⸻
+
+评审小结：各打几十分
+	•	原始 Task12：工程完备度 90，MVP 取舍 60，风险排布 65，总评“技术雄厚但路径过宽”。 ￼
+	•	修订版：MVP 取舍 95，风险聚焦 90，可运维性 85，总评“刀法精准、值得直接上马”。 ￼  ￼
+
+把上面这套计划跑完，你就得到一个可回滚、可验证、秒级循环的状态引擎，契合 PRD5 的微虚机主循环设定，并且可解释、可观测、能被轨迹仓沉淀复用。这才是“Good night, Oppie”第二天敢点“Merge”的底气。下一步自然就是把奖励函数里对Infra‑Cost/Token‑Cost/Risk‑Score的信号接入，让 MCTS 的“工程品味”越来越贴合你的北极星。 ￼
+
+如果你愿意，我可以把 Phase 2 的 overlayfs mount/commit 回滚协议与 WAL 事件模型再细化成接口签名与状态机图，直接贴进实现仓库开写。我这句“把 Phase 2 的 overlayfs 挂载/提交/回滚协议 + WAL 事件模型细化成接口与状态机”不是拍脑袋，来源很具体，三条证据链拼在一起：
+	1.	PRD5 的硬性约束：主循环必须跑在热态微虚机（Firecracker/gVisor/持久 Devcontainer），状态管理明确要求“CAS + COW，落在微虚机专用文件系统（如 overlayfs）上，确保近零成本切换”。这等于把“overlayfs 的内核级快照切换”定成了主战场，自然需要一套可复现的挂载/提交/回滚协议。 ￼  ￼
+	2.	原始 Task12 给出的能力边界：你在原计划里就写了“OverlayFS Integration 需走 syscall，in‑memory COW/ Merkle/ GC 自研”，目录结构里也有 cow/overlay_linux.go。这说明 overlayfs 是自研+内核交互的高风险段，不是“封装个库就好”的层面，因此我才强调把协议与 WAL 写实化。 ￼  ￼
+	3.	你后续修订版的取舍：修订把刀落在刀刃上——聚焦 overlayfs 封装、用 Manifest+引用计数替代 Merkle/GC，并把 StateManager 的三大 API（Create/Commit/Prune）与 P95<50ms 的门槛订清楚；还特别把“直接用 mount syscall 的 overlayfs wrapper”拉到 C 位，这就天然需要一个“提交=可回放、可恢复”的 WAL 流程。 ￼  ￼  ￼
+
+另外，原始计划里本就采用了两阶段原子写（临时文件→计算哈希→原子 rename）这种文件系统一致性常规战法，把它提升到“状态提交层”（WAL + 原子切换）是顺理成章的工程推进，而不是风格选择。 ￼
+
+⸻
+
+为了把那句“细化协议与事件模型”说透，我给出最小可落地版草图（你要我就直接按这个写代码）：
+
+接口草案
+
+// Overlay 层
+type Overlay interface {
+  Mount(lower string, snapshotID string) (merged string, err error) // 创建可写层+merged
+  Unmount(merged string) error                                       // 卸载与清理
+}
+
+// StateManager（同你修订稿的三件套）
+CreateNode(parent SnapshotID) (workdir string, err error)
+CommitNode(workdir string) (newSnap SnapshotID, err error)
+PruneNode(snap SnapshotID) error
+
+WAL 事件模型（精简字段）
+
+PREPARE(parent=SnapID, workdir, tmpUpper, ts)
+APPLY(manifestDigest, casWrites[], rcDelta[], ts)
+SWITCH(newSnap=SnapID, overlayAtomicRename, ts)
+FINALIZE(newSnap=SnapID, gcHints[], ts)
+
+提交协议（原子性/可恢复）
+	1.	PREPARE：把工作层的变更写到临时 upper；写 WAL: PREPARE 并 fsync。
+	2.	APPLY：生成 Manifest（带 root_digest），写入 CAS 与引用计数增量；写 WAL: APPLY 并 fsync。
+	3.	SWITCH：overlayfs 原子切换（rename/挂载点替换），写 WAL: SWITCH 并 fsync。
+	4.	FINALIZE：标记完成，落盘 gcHints；崩溃恢复时按 WAL 重放到最近一次 SWITCH 之后。
+（失败任一步 → 读取 WAL 回滚到上一个稳定快照并清理临时 upper。）
+
+状态机速写
+
+IDLE → PREPARE → APPLY → SWITCH → FINALIZE → IDLE
+         ↘───────────(error)────────────↗
+                 ROLLBACK(从 WAL 恢复)
+
+这套“overlayfs 协议 + WAL”的认知，就是依据 PRD5 的目标场景、你最初方案里的实现边界、以及你修订稿对接口与性能门槛的明确化三者叠加推出来的工程必需品；不是哲学，是“如何保证秒级主循环下的原子提交、崩溃一致、快速回滚”。 ￼  ￼  ￼
+
+如果你准备好了，我就直接把上面接口与状态机落成 overlay/manager.go + state/wal.go 的骨架，并配一组 kill‑9 混沌测试基准，一次性打通。

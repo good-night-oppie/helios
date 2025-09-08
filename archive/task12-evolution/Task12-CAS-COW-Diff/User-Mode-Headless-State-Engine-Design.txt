@@ -1,0 +1,133 @@
+Oppie 状态引擎 V3：“汞合金架构” - 系统设计文档
+1. 最终裁定与设计哲学
+“CAS+COW”方案因其固有的 CAP_SYS_ADMIN 安全风险和对特定内核版本的强依赖，在战略层面被否决。“水银范式” V2 提供了正确的方向，但其工程细节不足。
+“汞合金架构” 是我们最终采纳的方案。它继承了 V2 的用户态、零特权、结构共享的核心思想，并吸收了同行评审中提出的关键工程实践，形成了一套完整的、可实施的蓝图。
+核心设计哲学：
+ * 绝对零特权 (Absolute Zero-Privilege): 系统的任何部分都不得依赖 root 或任何 CAP_* 权限。它必须能以普通用户身份在任何标准的 Linux 容器或裸机中运行。
+ * 元数据与内容分离 (Metadata/Content Separation): 严格区分“文件树的结构（元数据）”和“文件的实际内容”，并采用不同的优化和存储策略。这是实现高性能的关键。
+ * 事务化原子性 (Transactional Atomicity): 所有的状态变更操作（尤其是 Commit）必须是原子性的。我们不自研复杂的 WAL，而是将一致性保证下沉，依赖成熟的底层 KV 存储（如 BadgerDB/RocksDB）的事务能力。
+ * 物理化按需进行 (On-Demand Materialization): MCTS 主循环中操作的是纯逻辑、内存态的文件树。只有当代码需要被外部工具（编译器、解释器、测试框架）执行时，才按需将虚拟文件系统“物理化”到磁盘上。
+2. 架构详解
+graph TD
+    subgraph MCTS Loop (In-Memory, Sub-millisecond Ops)
+        MCTS[MCTS Engine]
+        MEM_VST[In-Memory Virtual State Tree]
+        REWARD[Reward Function]
+    end
+
+    subgraph State Engine Core (Userspace, Zero-Privilege)
+        API[State Manager API]
+        COMMIT_LOGIC[Commit Logic]
+        DIFF_LOGIC[Diff Logic]
+        GC_LOGIC[Garbage Collection Logic]
+        CHECKOUT_LOGIC[Checkout/Materialization Logic]
+    end
+
+    subgraph Persistence Layer (Backed by RocksDB/BadgerDB)
+        CS[Content Store (CAS)]
+        TS[Tree Store (TNS)]
+        SS[Snapshot Store]
+    end
+
+    subgraph Execution Environment
+        FUSE[FUSE Driver (Optional)]
+        SANDBOX[Sandbox Workspace]
+    end
+
+    MCTS -- "writeFile(path, content)" --> MEM_VST
+    MCTS -- "commit()" --> API
+    API -- " " --> COMMIT_LOGIC
+    COMMIT_LOGIC -- "Read" --> MEM_VST
+    COMMIT_LOGIC -- "Write Transactions" --> CS
+    COMMIT_LOGIC -- " " --> TS
+    COMMIT_LOGIC -- " " --> SS
+    API -- "Returns SnapshotID" --> MCTS
+
+    MCTS -- "diff(snapA, snapB)" --> API
+    API -- " " --> DIFF_LOGIC
+    DIFF_LOGIC -- "Read" --> TS
+    API -- "Returns InsightDiff" --> REWARD
+
+    MCTS -- "restore(snapshotID)" --> API
+    API -- "Loads root hash" --> SS
+    API -- "Creates new" --> MEM_VST
+
+    MCTS -- "execute()" --> API
+    API -- " " --> CHECKOUT_LOGIC
+    CHECKOUT_LOGIC -- "Materialize tree at snapshotID" --> SANDBOX
+    CHECKOUT_LOGIC -- "Optionally mounts" --> FUSE
+
+2.1. 持久化层 (Persistence Layer)
+统一构建在单个高性能嵌入式 KV 数据库（如 RocksDB）之上，利用其列族（Column Family）特性来逻辑隔离不同的数据类型。
+ * Content Store (CS):
+   * 用途: 存储文件内容的去重块（Chunks）。
+   * Schema: Key: sha256(chunk_content) -> Value: chunk_content (binary)
+   * 细节: 文件在写入时被分块（例如，使用 FastCDC 算法），每个块独立存入 CS。这使得对于大文件的微小修改，也只需要存储新的、变动的块。
+ * Tree Store (TS):
+   * 用途: 存储 Merkle 树的不可变节点（目录和文件元数据）。
+   * Schema: Key: sha256(serialized_node) -> Value: serialized_node (e.g., Protobuf)
+   * FileNode 结构: { name: "index.js", type: "file", chunks: [chunk_hash_1, chunk_hash_2, ...] }
+   * DirNode 结构: { name: "src", type: "dir", children: { "index.js": file_node_hash, "utils": dir_node_hash, ... } }
+ * Snapshot Store (SS):
+   * 用途: 存储快照名称到其根节点 Hash 的映射，作为GC的根集合。
+   * Schema: Key: snapshot_id (e.g., uuid, timestamp) -> Value: root_tree_node_hash
+2.2. 核心逻辑详解
+a. Commit 操作 (O(Δ))
+当 MCTS 在内存中完成对 MEM_VST 的修改并调用 commit() 时：
+ * 锁定内存树: 暂时锁定 MEM_VST，防止进一步修改。
+ * 自底向上哈希: 从被修改的叶子节点开始，向上遍历至根。
+   * 为新的文件内容分块，将新块写入 CS。
+   * 创建新的 FileNode 对象，并计算其 Hash。
+   * 如果一个 DirNode 的子节点 Hash 发生变化，则创建一个新的 DirNode 对象，并重新计算其 Hash。
+   * 这个过程一直持续到根节点，得到一个新的 RootHash。
+ * 原子化写入: 启动一个 KV 数据库事务：
+   * 将所有新生成的 Node 对象（包括文件和目录节点）写入 TS。
+   * 将所有新生成的 Chunk 对象写入 CS。
+   * 生成一个新的 snapshot_id，并将其与新的 RootHash 的映射关系写入 SS。
+ * 提交事务: 提交该事务。所有变更一次性生效。
+ * 返回: 将 snapshot_id 返回给 MCTS。整个过程的延迟主要取决于 KV 库的事务提交延迟，对于现代 SSD 上的 RocksDB，这通常在毫秒级。
+b. Diff 操作 (O(Δ))
+给定两个 snapshot_id (A 和 B):
+ * 从 SS 中获取 A 和 B 的 RootHash。
+ * 调用一个递归函数 compareNodes(hashA, hashB, currentPath):
+   * 如果 hashA == hashB，直接返回（无差异）。
+   * 从 TS 中加载 nodeA 和 nodeB。
+   * 比较 nodeA 和 nodeB 的 children 映射。
+   * 对于只在 B 中存在的 childName，记录为“新增”。
+   * 对于只在 A 中存在的 childName，记录为“删除”。
+   * 对于两者都存在但 childHash 不同的 childName，递归调用 compareNodes。
+ * 此算法的性能极高，因为它完美地利用了 Merkle 树的特性，只遍历真正发生变化的路径。
+c. Checkout (物理化) 操作
+当需要执行代码时：
+ * 策略一 (首选): 惰性检出 (Lazy Checkout):
+   * 使用 FUSE (Filesystem in Userspace) 创建一个挂载点。
+   * FUSE 驱动的后端就是我们的状态引擎。当操作系统请求读取 /path/to/file 时，FUSE 驱动会：
+     * 解析路径，在 TS 中遍历 Merkle 树找到对应的 FileNode。
+     * 从 FileNode 中获取 chunk_hashes 列表。
+     * 从 CS 中逐个读取 chunk 内容并拼接起来，返回给操作系统。
+   * 优点: 启动速度极快（几乎为零），不占用额外磁盘空间。
+   * 缺点: 运行时有性能开销，因为每次文件访问都会通过 FUSE 驱动中转。对于 I/O 密集型任务（如大型编译）可能成为瓶颈。
+ * 策略二: 完全检出 (Full Checkout):
+   * 在沙箱工作区内，根据给定的 snapshot_id，完整地重建整个文件树的物理副本。
+   * 优点: 一旦检出完成，文件读写性能是原生的，没有额外开销。
+   * 缺点: 对于大型代码库，检出过程耗时且消耗磁盘空间。
+混合策略: 我们可以根据任务类型智能选择。对于短暂的、小范围的测试，使用惰性检出；对于需要高性能 I/O 的完整构建，使用完全检出。
+d. 垃圾回收 (Garbage Collection)
+GC 对于防止存储无限增长至关重要。
+ * 标记阶段 (Mark):
+   * 遍历 SS 中所有的 snapshot_id，获取所有的 RootHash。这些是“活跃”的根。
+   * 从每个 RootHash 开始，深度优先遍历整个 Merkle 树（在 TS 中）。
+   * 将所有可达的 Node Hash 和 Chunk Hash 记录到一个活跃集合中（例如，一个 Bloom Filter 或 HashSet）。
+ * 清除阶段 (Sweep):
+   * 迭代扫描 TS 和 CS 中的所有 Key。
+   * 如果一个 Key (Node Hash 或 Chunk Hash) 不在活跃集合中，则将其安全删除。
+ * 调度: GC 是一个后台任务，可以定期（例如，每晚）或在磁盘空间低于某个阈值时触发。
+3. 与 PRD5 的对齐
+ * 秒级循环 & 零成本切换: Commit 和 Diff 都在毫秒级完成，完全满足要求。状态切换通过改变内存中的 MEM_VST 指针实现，成本为零。
+ * 风险感知 & Insight Diff: Diff 操作的输出（新增/修改/删除的文件列表）是 InsightDiff 的直接来源，可无缝对接给静态分析和风险评分模块。
+ * 轨迹仓 (Episode Store): 每个 snapshot_id 及其关联的 InsightDiff 和 MCTS 奖励，天然构成轨迹仓中的一个时间点，可以轻松地被记录和查询。
+ * 无特权部署: 完美实现。整个系统是一个独立的用户态程序库，可以在任何地方运行。
+4. 结论
+“汞合金架构”是一个成熟、健壮且高性能的设计。它通过将问题域从复杂的内核文件系统操作，转化为纯粹的用户态数据结构和 KV 存储操作，从根本上解决了安全性、可移植性和性能可预测性的问题。
+它明确了实现路径，直面并解决了 GC、并发和物理化等关键工程挑战。这份设计文档已经足够详细，可以作为接下来工程团队实施的直接输入。
+我们已经找到了正确的道路。现在，是时候开始构建了。

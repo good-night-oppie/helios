@@ -1,0 +1,111 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "src/**/*.ts"
+    #   - "src/**/*.tsx"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
+
+jobs:
+  claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Use Claude 3.5 Sonnet for code reviews (more reliable than Opus)
+          # Note: Using older version due to thinking mode compatibility issue
+          model: "claude-3-5-sonnet-20240620"
+
+          # Direct prompt for automated review (no @claude mention needed)
+          direct_prompt: |
+            Please review this pull request and provide feedback on:
+            - Code quality and best practices
+            - Potential bugs or issues
+            - Performance considerations
+            - Security concerns
+            - Test coverage
+            - TDD compliance (this is a clean room implementation project)
+            
+            Be constructive and helpful in your feedback. Focus on:
+            - Maintaining ≥85% test coverage (100% for core components)
+            - Following clean room constraints (no blue_team references)
+            - Proper TDD workflow adherence
+            - Performance requirements for Helios state management
+
+          # Use sticky comments to make Claude reuse the same comment on subsequent pushes to the same PR
+          use_sticky_comment: true
+          
+          # Optional: Customize review based on file types
+          # direct_prompt: |
+          #   Review this PR focusing on:
+          #   - For TypeScript files: Type safety and proper interface usage
+          #   - For API endpoints: Security, input validation, and error handling
+          #   - For React components: Performance, accessibility, and best practices
+          #   - For tests: Coverage, edge cases, and test quality
+          
+          # Optional: Different prompts for different authors
+          # direct_prompt: |
+          #   ${{ github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR' && 
+          #   'Welcome! Please review this PR from a first-time contributor. Be encouraging and provide detailed explanations for any suggestions.' ||
+          #   'Please provide a thorough code review focusing on our coding standards and best practices.' }}
+          
+          # Optional: Add specific tools for running tests or linting
+          # allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck)"
+          
+          # Optional: Skip review for certain conditions
+          # if: |
+          #   !contains(github.event.pull_request.title, '[skip-review]') &&
+          #   !contains(github.event.pull_request.title, '[WIP]')
+
+      # Enhanced error handling for review failures
+      - name: Handle Claude Review Failure
+        if: failure() && steps.claude-review.conclusion == 'failure'
+        shell: bash
+        run: |
+          echo "::error::Claude Code Review action failed"
+          echo "::notice::The automated code review could not be completed"
+          
+          # Check for specific error types
+          if [[ "${{ steps.claude-review.outputs.error }}" == *"model"* ]]; then
+            echo "::error::Model configuration error detected"
+            echo "::notice::Attempted to use model: claude-3-5-sonnet-20241022"
+          elif [[ "${{ steps.claude-review.outputs.error }}" == *"401"* || "${{ steps.claude-review.outputs.error }}" == *"403"* ]]; then
+            echo "::error::Authentication error - please check CLAUDE_CODE_OAUTH_TOKEN secret"
+          elif [[ "${{ steps.claude-review.outputs.error }}" == *"429"* ]]; then
+            echo "::error::Rate limit exceeded - review will be skipped"
+          fi
+          
+          # Create a fallback comment
+          echo "::notice::Consider manual code review or check GitHub Action logs for details"
+          
+          echo "::group::Debug Information"
+          echo "Error output: ${{ steps.claude-review.outputs.error }}"
+          echo "Step conclusion: ${{ steps.claude-review.conclusion }}"
+          echo "PR number: ${{ github.event.pull_request.number }}"
+          echo "PR author: ${{ github.event.pull_request.user.login }}"
+          echo "::endgroup::"

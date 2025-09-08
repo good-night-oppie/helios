@@ -18,8 +18,8 @@ package objstore
 import (
 	"errors"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
-	"github.com/tecbot/gorocksdb"
 )
 
 type Options struct {
@@ -38,44 +38,44 @@ type Store interface {
 	Close() error
 }
 
-type rocksStore struct {
-	db *gorocksdb.DB
-	ro *gorocksdb.ReadOptions
-	wo *gorocksdb.WriteOptions
+type pebbleStore struct {
+	db *pebble.DB
 }
 
-func Open(path string, _ *Options) (Store, error) {
-	opts := gorocksdb.NewDefaultOptions()
-	opts.SetCreateIfMissing(true)
-	db, err := gorocksdb.OpenDb(opts, path)
+func Open(path string, opts *Options) (Store, error) {
+	pebbleOpts := &pebble.Options{
+		// Optimize for write-heavy workload (AI agents commit frequently)
+		MemTableSize:             64 << 20, // 64MB
+		MemTableStopWritesThreshold: 4,
+		L0CompactionThreshold:    4,
+		L0StopWritesThreshold:    12,
+		LBaseMaxBytes:            64 << 20, // 64MB
+		MaxConcurrentCompactions: func() int { return 3 },
+		// Enable WAL for durability
+		DisableWAL: false,
+	}
+
+	if opts != nil && opts.ReadOnly {
+		pebbleOpts.ReadOnly = true
+	}
+
+	db, err := pebble.Open(path, pebbleOpts)
 	if err != nil {
 		return nil, err
 	}
-	wo := gorocksdb.NewDefaultWriteOptions()
-	wo.SetSync(true)
 
-	return &rocksStore{
-		db: db,
-		ro: gorocksdb.NewDefaultReadOptions(),
-		wo: wo,
-	}, nil
+	return &pebbleStore{db: db}, nil
 }
 
-func (s *rocksStore) Close() error {
+func (s *pebbleStore) Close() error {
 	if s.db != nil {
-		s.db.Close()
-	}
-	if s.ro != nil {
-		s.ro.Destroy()
-	}
-	if s.wo != nil {
-		s.wo.Destroy()
+		return s.db.Close()
 	}
 	return nil
 }
 
 // PutBatch writes all entries atomically. Preflight rejects any nil value.
-func (s *rocksStore) PutBatch(batch []BatchEntry) error {
+func (s *pebbleStore) PutBatch(batch []BatchEntry) error {
 	// First validate all values
 	for _, entry := range batch {
 		if entry.Value == nil {
@@ -83,32 +83,37 @@ func (s *rocksStore) PutBatch(batch []BatchEntry) error {
 		}
 	}
 
-	wb := gorocksdb.NewWriteBatch()
-	defer wb.Destroy()
+	// Use Pebble batch for atomic writes
+	b := s.db.NewBatch()
+	defer b.Close()
 
 	// Iterate through batch and write
 	for _, entry := range batch {
 		// Use only the digest part as key, since String() includes the algorithm prefix
 		k := entry.Hash.Digest
-		wb.Put(k, entry.Value)
+		if err := b.Set(k, entry.Value, pebble.Sync); err != nil {
+			return err
+		}
 	}
 
-	return s.db.Write(s.wo, wb)
+	return b.Commit(pebble.Sync)
 }
 
-// Get returns (value, ok, err). ok=false when key is missing, err on RocksDB error.
-func (s *rocksStore) Get(h types.Hash) ([]byte, bool, error) {
+// Get returns (value, ok, err). ok=false when key is missing, err on PebbleDB error.
+func (s *pebbleStore) Get(h types.Hash) ([]byte, bool, error) {
 	// Use only the digest part as key, since String() includes the algorithm prefix
 	k := h.Digest
-	val, err := s.db.Get(s.ro, k)
+	val, closer, err := s.db.Get(k)
 	if err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
-	defer val.Free()
-	if !val.Exists() {
-		return nil, false, nil
-	}
-	data := make([]byte, len(val.Data()))
-	copy(data, val.Data())
+	defer closer.Close()
+	
+	// Copy the data since it's only valid until closer.Close()
+	data := make([]byte, len(val))
+	copy(data, val)
 	return data, true, nil
 }

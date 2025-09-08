@@ -1,0 +1,426 @@
+# SPDX-FileCopyrightText: 2025 Good Night Oppie
+# SPDX-License-Identifier: MIT
+
+name: CI
+
+permissions:
+  contents: read
+  pull-requests: read
+
+on:
+  push:
+    branches: [main, master, develop, "feat/*", "fix/*"]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+    inputs:
+      runner_type:
+        description: 'Runner type'
+        required: false
+        default: '[self-hosted, ai-runner-1]'
+        type: choice
+        options:
+          - '[self-hosted, ai-runner-1]'
+          - '[self-hosted, ai-runner-2]'
+          - ubuntu-latest
+
+# Cancel in-progress runs for same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.23.x'
+  NODE_VERSION: '20'
+  # Cache paths for self-hosted runner
+  GOCACHE: /opt/runner-cache/go-build
+  GOMODCACHE: /opt/runner-cache/go-mod
+  GOLANGCI_LINT_CACHE: /opt/runner-cache/golangci-lint
+
+jobs:
+  # Detect what changed to run only necessary jobs
+  changes:
+    name: Detect Changes
+    runs-on: [self-hosted, ai-ci]
+    timeout-minutes: 2
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      docs: ${{ steps.filter.outputs.docs }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for change detection
+          
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - 'backend/**/*.go'
+              - 'internal/**/*.go'
+              - 'pkg/**/*.go'
+              - 'cmd/**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci*.yml'
+            frontend:
+              - 'frontend/**/*.ts'
+              - 'frontend/**/*.tsx'
+              - 'frontend/**/*.js'
+              - 'frontend/**/*.jsx'
+              - 'frontend/package*.json'
+              - 'frontend/tsconfig.json'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+            ci:
+              - '.github/workflows/**'
+              - 'Makefile'
+              - '.golangci*.yml'
+              - 'lefthook.yml'
+
+  # Go linting and format checks - FAST execution
+  go-lint-and-format:
+    name: Go Lint & Format
+    needs: changes
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: [self-hosted, ai-ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # For new-from-rev in golangci-lint
+      
+      # Fix cache permissions for self-hosted runner
+      - name: Fix cache directory permissions
+        run: |
+          echo "🔧 Fixing cache directory permissions..."
+          # Check if running on self-hosted runner
+          if [ -d "/opt/runner-cache" ]; then
+            echo "Self-hosted runner detected, fixing permissions..."
+            sudo rm -rf /opt/runner-cache/* 2>/dev/null || true
+            sudo mkdir -p /opt/runner-cache/go-build /opt/runner-cache/go-mod /opt/runner-cache/golangci-lint || true
+            sudo chmod -R 777 /opt/runner-cache || true
+            echo "✅ Cache permissions fixed"
+          else
+            echo "Not a self-hosted runner, skipping cache fix"
+          fi
+      
+      - name: Setup Go with cache
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            backend/go.sum
+      
+      # Install tools if not on self-hosted runner
+      - name: Install tools
+        if: runner.name != 'self-hosted'
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.4.7
+      
+      # Parallel execution of quality checks
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "❌ Unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "✅ All files formatted"
+      
+      - name: Go vet
+        run: |
+          echo "🔍 Running go vet..."
+          go vet ./...
+          
+          # Also run in backend if exists
+          if [ -d backend ]; then
+            cd backend && go vet ./...
+          fi
+          echo "✅ Go vet passed"
+      
+      - name: Fast lint (pre-commit config)
+        run: |
+          echo "⚡ Running fast lint checks..."
+          golangci-lint run --config=.golangci-fast.yml --timeout=30s
+      
+      - name: Full lint (CI only)
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          echo "🔍 Running comprehensive lint..."
+          golangci-lint run --config=.golangci.yml --timeout=3m
+
+  # Go tests with coverage
+  go-test:
+    name: Go Tests
+    needs: changes
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: [self-hosted, ai-release]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        test_type: [unit, race, integration]
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Fix cache permissions for self-hosted runner
+      - name: Fix cache directory permissions
+        run: |
+          echo "🔧 Fixing cache directory permissions..."
+          # Check if running on self-hosted runner
+          if [ -d "/opt/runner-cache" ]; then
+            echo "Self-hosted runner detected, fixing permissions..."
+            sudo rm -rf /opt/runner-cache/* 2>/dev/null || true
+            sudo mkdir -p /opt/runner-cache/go-build /opt/runner-cache/go-mod /opt/runner-cache/golangci-lint || true
+            sudo chmod -R 777 /opt/runner-cache || true
+            echo "✅ Cache permissions fixed"
+          else
+            echo "Not a self-hosted runner, skipping cache fix"
+          fi
+      
+      - name: Setup Go with cache
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Cache test results
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-test
+            backend/.testcache
+            /opt/runner-cache/go-test
+          key: ${{ runner.os }}-gotest-${{ matrix.test_type }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gotest-${{ matrix.test_type }}-
+            ${{ runner.os }}-gotest-
+      
+      - name: Run ${{ matrix.test_type }} tests
+        run: |
+          case "${{ matrix.test_type }}" in
+            unit)
+              echo "🧪 Running unit tests..."
+              make test-go
+              ;;
+            race)
+              echo "🏃 Running race detection tests..."
+              go test -race -short -timeout=5m ./...
+              if [ -d backend ]; then
+                cd backend && go test -race -short -timeout=5m ./...
+              fi
+              ;;
+            integration)
+              echo "🔗 Running integration tests..."
+              if [ -d tests/integration ]; then
+                go test -tags=integration -timeout=10m ./tests/integration/...
+              else
+                echo "No integration tests found, skipping"
+              fi
+              ;;
+          esac
+      
+      - name: Check coverage
+        if: matrix.test_type == 'unit'
+        run: |
+          echo "📊 Checking coverage..."
+          make cover-check-go || true  # Don't fail on coverage for now
+          
+          # Upload coverage if available
+          if [ -f backend/coverage.out ]; then
+            echo "Coverage report generated"
+          fi
+      
+      - name: Upload coverage
+        if: matrix.test_type == 'unit' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-go
+          path: |
+            backend/coverage.out
+            backend/coverage.html
+          retention-days: 7
+
+  # Frontend quality checks (skip if frontend doesn't exist)
+  frontend-quality:
+    name: Frontend Quality
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: [self-hosted, ai-release]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check if frontend exists
+        id: frontend-check
+        run: |
+          if [ -d "frontend" ] && [ -f "frontend/package.json" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Frontend directory found"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Frontend not initialized yet, skipping frontend checks"
+          fi
+      
+      - name: Setup Node
+        if: steps.frontend-check.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      
+      - name: Cache node modules
+        if: steps.frontend-check.outputs.exists == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            frontend/node_modules
+            ~/.npm
+            /opt/runner-cache/npm
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      
+      - name: Install dependencies
+        if: steps.frontend-check.outputs.exists == 'true'
+        run: |
+          cd frontend
+          npm ci --prefer-offline --no-audit
+      
+      - name: Parallel quality checks
+        if: steps.frontend-check.outputs.exists == 'true'
+        run: |
+          cd frontend
+          
+          # Run checks in parallel
+          echo "🔍 Running quality checks..."
+          
+          npm run lint &
+          LINT_PID=$!
+          
+          npm run typecheck &
+          TYPE_PID=$!
+          
+          npm run test -- --run &
+          TEST_PID=$!
+          
+          # Wait for all to complete
+          wait $LINT_PID && echo "✅ ESLint passed" || exit 1
+          wait $TYPE_PID && echo "✅ TypeScript check passed" || exit 1
+          wait $TEST_PID && echo "✅ Tests passed" || exit 1
+      
+      - name: Build check
+        if: steps.frontend-check.outputs.exists == 'true'
+        run: |
+          cd frontend
+          echo "🏗️ Building frontend..."
+          npm run build
+          echo "✅ Build successful"
+
+  # Security scanning
+  security:
+    name: Security Scan
+    needs: changes
+    if: (needs.changes.outputs.go == 'true' || needs.changes.outputs.frontend == 'true') && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+    runs-on: [self-hosted, ai-ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go
+        if: needs.changes.outputs.go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      - name: Go Security Scan
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          echo "🔒 Running security scans..."
+          
+          # Install gosec if not available
+          if ! command -v gosec &> /dev/null; then
+            go install github.com/securego/gosec/v2/cmd/gosec@latest
+          fi
+          
+          # Run gosec with better error handling
+          if gosec -fmt sarif -out gosec.sarif ./... ; then
+            echo "✅ No security issues found"
+          else
+            echo "⚠️ Security issues detected - see gosec.sarif for details"
+            # Count issues if jq is available
+            if command -v jq &> /dev/null; then
+              ISSUE_COUNT=$(jq '.runs[0].results | length' gosec.sarif)
+              echo "Found $ISSUE_COUNT security issue(s)"
+            fi
+          fi
+          
+          # Check for vulnerabilities
+          echo "🔍 Checking for known vulnerabilities..."
+          if go list -json -deps ./... | go run golang.org/x/vuln/cmd/govulncheck@latest ; then
+            echo "✅ No known vulnerabilities"
+          else
+            echo "⚠️ Vulnerabilities found - review output above"
+          fi
+          
+          echo "✅ Security scan complete"
+      
+      - name: Upload security results
+        if: always() && needs.changes.outputs.go == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+        continue-on-error: true
+
+  # Summary job for branch protection
+  required-checks-summary:
+    name: Required Checks Summary
+    if: always()
+    needs: [go-lint-and-format, go-test, frontend-quality]
+    runs-on: [self-hosted, ai-ci]
+    timeout-minutes: 2
+    steps:
+      - name: Summary
+        run: |
+          echo "## CI Summary"
+          echo ""
+          
+          # Check job statuses
+          if [ "${{ needs.go-lint-and-format.result }}" == "success" ] || [ "${{ needs.go-lint-and-format.result }}" == "skipped" ]; then
+            echo "✅ Go Lint & Format: ${{ needs.go-lint-and-format.result }}"
+          else
+            echo "❌ Go Lint & Format: ${{ needs.go-lint-and-format.result }}"
+          fi
+          
+          if [ "${{ needs.go-test.result }}" == "success" ] || [ "${{ needs.go-test.result }}" == "skipped" ]; then
+            echo "✅ Go Tests: ${{ needs.go-test.result }}"
+          else
+            echo "❌ Go Tests: ${{ needs.go-test.result }}"
+          fi
+          
+          if [ "${{ needs.frontend-quality.result }}" == "success" ] || [ "${{ needs.frontend-quality.result }}" == "skipped" ]; then
+            echo "✅ Frontend: ${{ needs.frontend-quality.result }}"
+          else
+            echo "❌ Frontend: ${{ needs.frontend-quality.result }}"
+          fi
+          
+          # Fail if any required job failed
+          if [ "${{ needs.go-lint-and-format.result }}" == "failure" ] || \
+             [ "${{ needs.go-test.result }}" == "failure" ] || \
+             [ "${{ needs.frontend-quality.result }}" == "failure" ]; then
+            echo ""
+            echo "❌ CI Failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ CI Passed"

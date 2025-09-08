@@ -1,0 +1,105 @@
+# .github/workflows/claude-self-hosted.yml
+name: Claude PR Assistant (Self-Hosted)
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude-code-action:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
+    runs-on: [self-hosted, ai-ci]  # Use ai-runner-1 (ai-ci label) for Claude reviews
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Fix Claude CLI configuration before running the action
+      - name: Fix Claude CLI Configuration
+        shell: bash
+        run: |
+          echo "Checking and fixing Claude CLI configuration..."
+          
+          # Check if Claude settings exist
+          CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+          if [[ -f "$CLAUDE_SETTINGS" ]]; then
+            echo "Current Claude settings:"
+            cat "$CLAUDE_SETTINGS" || echo "Cannot read settings file"
+            
+            # Fix invalid model name if present
+            if grep -q "opusplan\|opus" "$CLAUDE_SETTINGS"; then
+              echo "Fixing invalid model configuration..."
+              # Backup current settings
+              cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.backup"
+              
+              # Remove or fix the invalid model configuration
+              sed -i 's/"opusplan"/"claude-3-5-sonnet-20241022"/g' "$CLAUDE_SETTINGS"
+              sed -i 's/"opus"/"claude-3-5-sonnet-20241022"/g' "$CLAUDE_SETTINGS"
+              
+              echo "Updated Claude settings:"
+              cat "$CLAUDE_SETTINGS" || echo "Cannot read updated settings file"
+            fi
+          else
+            echo "No Claude settings file found at $CLAUDE_SETTINGS"
+            echo "Creating directory structure..."
+            mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+          fi
+
+      - name: Run Claude PR Action
+        id: claude-action
+        uses: grll/claude-code-action@beta
+        with:
+          use_oauth: true
+          claude_access_token: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
+          claude_refresh_token: ${{ secrets.CLAUDE_REFRESH_TOKEN }}
+          claude_expires_at: ${{ secrets.CLAUDE_EXPIRES_AT }}
+          secrets_admin_pat: ${{ secrets.SECRETS_ADMIN_PAT }}
+          timeout_minutes: "60"
+          
+          # Explicitly specify a valid model to override any invalid configuration
+          model: "claude-3-5-sonnet-20241022"
+
+      # Enhanced error handling
+      - name: Handle Claude Action Failure
+        if: failure() && steps.claude-action.conclusion == 'failure'
+        shell: bash
+        run: |
+          echo "Claude Action failed. Analyzing error..."
+          
+          # Check if the error was due to invalid model
+          if grep -q "opusplan\|not_found_error\|404" "$GITHUB_WORKSPACE/.github_action_logs" 2>/dev/null; then
+            echo "::error::Invalid model configuration detected. Please check Claude CLI settings."
+            echo "::notice::The action attempted to fix the model configuration but failed."
+            
+            # Try fallback to official Anthropic action
+            echo "::warning::Consider switching to the official anthropics/claude-code-action@beta"
+          fi
+          
+          # Log debugging information
+          echo "::group::Debug Information"
+          echo "Runner OS: $(uname -a)"
+          echo "Claude CLI version: $(claude --version || echo 'Claude CLI not found')"
+          echo "Claude settings location: $HOME/.claude/settings.json"
+          if [[ -f "$HOME/.claude/settings.json" ]]; then
+            echo "Claude settings content:"
+            cat "$HOME/.claude/settings.json" || echo "Cannot read settings"
+          fi
+          echo "::endgroup::"
+          
+          exit 1

@@ -1,0 +1,234 @@
+name: Claude PR Assistant (Fixed)
+
+on:
+  # Trigger on PR comments mentioning @claude
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  
+  # Auto-review on PR open/sync (optional)
+  pull_request:
+    types: [opened, synchronize]
+    
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review (optional)'
+        required: false
+        default: ''
+
+jobs:
+  claude-pr-review:
+    # Run when @claude is mentioned or on PR events
+    if: |
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch'
+    
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # Required for Claude to read CI results
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+      
+      - name: Setup Environment
+        id: setup
+        run: |
+          echo "Setting up Claude environment..."
+          
+          # Get PR number for different event types
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          else
+            PR_NUMBER="${{ github.event.issue.number }}"
+          fi
+          
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          
+          # Check if we have refresh token configured
+          if [ -n "${{ secrets.CLAUDE_REFRESH_TOKEN }}" ]; then
+            echo "use_refresh_token=true" >> $GITHUB_OUTPUT
+            echo "✅ Using refresh token authentication"
+          else
+            echo "use_refresh_token=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using OAuth token authentication"
+          fi
+          
+          # Get current timestamp for token expiry (30 days from now)
+          EXPIRES_AT=$(date -d "+30 days" +%s)000
+          echo "expires_at=$EXPIRES_AT" >> $GITHUB_OUTPUT
+      
+      # Option 1: Use OAuth token (standard approach)
+      - name: Run Claude Review (OAuth)
+        if: steps.setup.outputs.use_refresh_token == 'false'
+        id: claude-oauth
+        uses: anthropics/claude-code-action@beta
+        with:
+          # OAuth token from repository secrets
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          
+          # Use Claude 3.5 Sonnet (stable and reliable)
+          # Valid models as of v1.0.88+:
+          # - claude-3-5-sonnet-20241022 (recommended)
+          # - claude-3-5-haiku-20241022
+          # - claude-opus-4-1-20250805 (for complex reviews)
+          model: "claude-3-5-sonnet-20241022"
+          
+          # Timeout for long reviews
+          timeout_minutes: "30"
+          
+          # Allow tools for analysis
+          allowed_tools: "Bash(npm test),Bash(go test),Grep,Read"
+          
+          # Use sticky comments to update same comment
+          use_sticky_comment: true
+          
+          # Custom instructions
+          custom_instructions: |
+            You are reviewing code for the Oppie Thunder project.
+            
+            Focus on:
+            1. Code correctness and bug detection
+            2. Performance issues (especially for Helios state management)
+            3. Security vulnerabilities
+            4. Test coverage (must be ≥85%, core packages 100%)
+            5. Clean room compliance (no blue_team references)
+            6. TDD workflow adherence
+            
+            Be constructive and provide specific suggestions with code examples.
+      
+      # Option 2: Use refresh token (for self-hosted or when OAuth fails)
+      - name: Run Claude Review (Refresh Token)
+        if: steps.setup.outputs.use_refresh_token == 'true'
+        id: claude-refresh
+        uses: anthropics/claude-code-action@beta
+        with:
+          # Use OAuth with refresh token for automatic renewal
+          use_oauth: true
+          claude_access_token: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
+          claude_refresh_token: ${{ secrets.CLAUDE_REFRESH_TOKEN }}
+          claude_expires_at: ${{ steps.setup.outputs.expires_at }}
+          
+          # Same configuration as OAuth version
+          model: "claude-3-5-sonnet-20241022"
+          timeout_minutes: "30"
+          allowed_tools: "Bash(npm test),Bash(go test),Grep,Read"
+          use_sticky_comment: true
+          
+          custom_instructions: |
+            You are reviewing code for the Oppie Thunder project.
+            
+            Focus on:
+            1. Code correctness and bug detection
+            2. Performance issues (especially for Helios state management)
+            3. Security vulnerabilities
+            4. Test coverage (must be ≥85%, core packages 100%)
+            5. Clean room compliance (no blue_team references)
+            6. TDD workflow adherence
+            
+            Be constructive and provide specific suggestions with code examples.
+      
+      # Error handling and debugging
+      - name: Handle Review Failure
+        if: failure()
+        run: |
+          echo "::error::Claude review failed"
+          
+          # Common error patterns and solutions
+          ERROR_MSG="${{ steps.claude-oauth.outputs.error || steps.claude-refresh.outputs.error }}"
+          
+          if [[ "$ERROR_MSG" == *"opusplan"* || "$ERROR_MSG" == *"not_found_error"* ]]; then
+            echo "::error::Invalid model name detected"
+            echo "::notice::Solution: Update to use 'claude-3-5-sonnet-20241022' instead of 'opus' or 'opusplan'"
+            echo ""
+            echo "Valid model names (Claude v1.0.88+):"
+            echo "  - claude-3-5-sonnet-20241022 (recommended)"
+            echo "  - claude-3-5-haiku-20241022"
+            echo "  - claude-opus-4-1-20250805"
+          elif [[ "$ERROR_MSG" == *"401"* || "$ERROR_MSG" == *"403"* ]]; then
+            echo "::error::Authentication failed"
+            echo "::notice::Solution: Check CLAUDE_CODE_OAUTH_TOKEN or refresh token secrets"
+            echo ""
+            echo "To get OAuth token:"
+            echo "1. Install Claude CLI: npm install -g @anthropic-ai/claude-code"
+            echo "2. Login: claude login"
+            echo "3. Get token: claude oauth-token"
+            echo "4. Add to GitHub secrets as CLAUDE_CODE_OAUTH_TOKEN"
+          elif [[ "$ERROR_MSG" == *"429"* ]]; then
+            echo "::warning::Rate limit exceeded"
+            echo "::notice::Claude will retry automatically or wait before next review"
+          elif [[ "$ERROR_MSG" == *"timeout"* ]]; then
+            echo "::warning::Review timed out"
+            echo "::notice::Consider increasing timeout_minutes or simplifying review scope"
+          fi
+          
+          echo ""
+          echo "::group::Debug Information"
+          echo "Claude CLI version requirement: >=1.0.88"
+          echo "Current workflow uses: anthropics/claude-code-action@beta"
+          echo "Model configured: claude-3-5-sonnet-20241022"
+          echo "Event: ${{ github.event_name }}"
+          echo "PR: ${{ steps.setup.outputs.pr_number }}"
+          echo "Error: $ERROR_MSG"
+          echo "::endgroup::"
+      
+      # Success notification
+      - name: Review Success
+        if: success()
+        run: |
+          echo "✅ Claude review completed successfully"
+          echo "Model used: claude-3-5-sonnet-20241022"
+          echo "PR: ${{ steps.setup.outputs.pr_number }}"
+
+  # Automated review for new PRs (lighter weight)
+  claude-auto-review:
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Quick Review for New PR
+        uses: anthropics/claude-code-action@beta
+        continue-on-error: true # Don't fail the workflow if review fails
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          model: "claude-3-5-sonnet-20241022"
+          timeout_minutes: "10"
+          
+          direct_prompt: |
+            Provide a quick initial review of this new PR:
+            - Check for obvious issues or bugs
+            - Verify it follows project conventions
+            - Suggest improvements if needed
+            - Welcome new contributors appropriately
+            
+            Keep the review brief and constructive.
+          
+          use_sticky_comment: true
