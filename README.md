@@ -7,7 +7,7 @@
 
 [![Platform Support](https://img.shields.io/badge/platforms-Linux%20|%20macOS%20|%20Windows-success?style=for-the-badge)](https://github.com/good-night-oppie/helios/releases)
 [![Architecture](https://img.shields.io/badge/arch-AMD64%20|%20ARM64-blue?style=for-the-badge)](https://github.com/good-night-oppie/helios/releases)
-[![Ask DeepWiki](https://img.shields.io/badge/Ask_DeepWiki-Open-blue)](https://deepwiki.com/good-night-oppie/helios)
+[![Ask DeepWiki](https://img.shields.io/badge/deepwiki-indexed-purple?style=for-the-badge)](https://deepwiki.com/good-night-oppie/helios)
 [![README_ZH](https://img.shields.io/badge/中文文档-README__ZH.md-red?style=for-the-badge)](README_ZH.md)
 
 ## Problems Helios Solves
