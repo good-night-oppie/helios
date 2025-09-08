@@ -1,5 +1,15 @@
 # Helios - Fast Version Control for AI Agents
 
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/good-night-oppie/helios?style=for-the-badge)](https://github.com/good-night-oppie/helios/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/good-night-oppie/helios/total?style=for-the-badge&color=brightgreen)](https://github.com/good-night-oppie/helios/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=for-the-badge)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?style=for-the-badge&logo=go)](https://golang.org/)
+
+[![Platform Support](https://img.shields.io/badge/platforms-Linux%20|%20macOS%20|%20Windows-success?style=for-the-badge)](https://github.com/good-night-oppie/helios/releases)
+[![Architecture](https://img.shields.io/badge/arch-AMD64%20|%20ARM64-blue?style=for-the-badge)](https://github.com/good-night-oppie/helios/releases)
+[![DeepWiki](https://img.shields.io/badge/deepwiki-indexed-purple?style=for-the-badge)](https://deepwiki.com/good-night-oppie/helios)
+[![README_ZH](https://img.shields.io/badge/中文文档-README__ZH.md-red?style=for-the-badge)](README_ZH.md)
+
 ## Problems Helios Solves
 
 **High-frequency commits**: AI agents generate 100+ commits/hour, Git becomes bottleneck
@@ -191,6 +201,16 @@ time git commit --allow-empty -m "test"    # ~20ms
 time helios commit --work .                 # Current: ~1-5ms, Target: <1ms
 ```
 
+## Latest Release
+
+🚀 **v0.0.1** is now available with:
+- ✅ **Cross-platform binaries** for Linux/macOS/Windows (AMD64/ARM64)
+- ✅ **PebbleDB storage** (pure Go, no CGO dependencies)
+- ✅ **Core CLI commands** ready for AI workflows
+- ✅ **One-line install** via curl script
+
+[📦 Download from GitHub Releases](https://github.com/good-night-oppie/helios/releases/latest)
+
 ## Technical Details
 
 See [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md) for implementation details.
@@ -198,4 +218,5 @@ See [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md) for implementation details.
 ## Issues & Support
 
 - **Issues**: [GitHub Issues](https://github.com/good-night-oppie/helios/issues)
+- **Docs**: [DeepWiki Documentation](https://deepwiki.com/good-night-oppie/helios)
 - **Status**: Alpha release
