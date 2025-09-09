@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package main
 
 import (
@@ -194,25 +193,25 @@ func TestMainCommandParsing(t *testing.T) {
 }
 
 func TestHandleVersion(t *testing.T) {
-    // Capture stdout to verify version prints a non-empty line.
-    old := os.Stdout
-    r, w, err := os.Pipe()
-    if err != nil {
-        t.Fatalf("pipe: %v", err)
-    }
-    os.Stdout = w
+	// Capture stdout to verify version prints a non-empty line.
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
 
-    handleVersion()
+	handleVersion()
 
-    _ = w.Close()
-    os.Stdout = old
-    buf := make([]byte, 256)
-    n, _ := r.Read(buf)
-    out := string(buf[:n])
-    if out == "" {
-        t.Fatal("expected version output")
-    }
-    if version == "" || commit == "" || date == "" {
-        t.Fatal("version metadata should be non-empty strings")
-    }
+	_ = w.Close()
+	os.Stdout = old
+	buf := make([]byte, 256)
+	n, _ := r.Read(buf)
+	out := string(buf[:n])
+	if out == "" {
+		t.Fatal("expected version output")
+	}
+	if version == "" || commit == "" || date == "" {
+		t.Fatal("version metadata should be non-empty strings")
+	}
 }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package main
 
 import (
@@ -74,15 +73,15 @@ func TestCLI_Help(t *testing.T) {
 }
 
 func TestCLI_Version(t *testing.T) {
-    bin := filepath.Join(t.TempDir(), "helios-cli.testbin")
-    if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-        t.Fatalf("build failed: %v\n%s", err, string(out))
-    }
-    out, err := exec.Command(bin, "--version").CombinedOutput()
-    if err != nil {
-        t.Fatalf("--version failed: %v\n%s", err, string(out))
-    }
-    if len(out) == 0 {
-        t.Fatalf("version should print output")
-    }
+	bin := filepath.Join(t.TempDir(), "helios-cli.testbin")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, string(out))
+	}
+	out, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("--version failed: %v\n%s", err, string(out))
+	}
+	if len(out) == 0 {
+		t.Fatalf("version should print output")
+	}
 }
