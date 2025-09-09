@@ -10,6 +10,8 @@
 [![Ask DeepWiki](https://img.shields.io/badge/deepwiki-indexed-purple?style=for-the-badge)](https://deepwiki.com/good-night-oppie/helios)
 [![README_ZH](https://img.shields.io/badge/中文文档-README__ZH.md-red?style=for-the-badge)](README_ZH.md)
 
+**H**ybrid / **E**fficient / **L**ayered / **I**ncremental **O**bject **S**tate (Engine)
+
 ## Problems Helios Solves
 
 **High-frequency commits**: AI agents generate 100+ commits/hour, Git becomes bottleneck
