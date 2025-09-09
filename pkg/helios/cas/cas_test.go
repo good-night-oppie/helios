@@ -20,6 +20,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -495,5 +498,160 @@ func function%d() {
 			require.NoError(t, err)
 			assert.Equal(t, files[i], retrieved)
 		}
+	})
+}
+
+// TestRaceConditionAndShutdown tests the critical race conditions identified in PR #14 comments
+func TestRaceConditionAndShutdown(t *testing.T) {
+	t.Run("Concurrent_Store_Operations_During_Shutdown", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := NewBLAKE3Store(tempDir)
+		require.NoError(t, err)
+		
+		const numGoroutines = 100
+		const opsPerGoroutine = 10
+		
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		
+		// Start concurrent store operations
+		for i := 0; i < numGoroutines; i++ {
+			go func(id int) {
+				defer wg.Done()
+				for j := 0; j < opsPerGoroutine; j++ {
+					content := []byte(fmt.Sprintf("content-%d-%d", id, j))
+					_, err := store.Store(content)
+					// Either succeeds or fails with "store is closed" - both are acceptable
+					if err != nil {
+						assert.Contains(t, err.Error(), "store is closed")
+					}
+				}
+			}(i)
+		}
+		
+		// Allow some operations to start
+		time.Sleep(10 * time.Millisecond)
+		
+		// Close the store while operations are running
+		err = store.Close()
+		require.NoError(t, err)
+		
+		// Wait for all goroutines to complete
+		wg.Wait()
+		
+		// Verify store is properly closed
+		_, err = store.Store([]byte("should fail"))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "store is closed")
+	})
+	
+	t.Run("No_Send_On_Closed_Channel_Panic", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := NewBLAKE3Store(tempDir)
+		require.NoError(t, err)
+		
+		// Fill the write queue to trigger fallback paths
+		for i := 0; i < 1100; i++ { // More than buffer size (1000)
+			go func(id int) {
+				content := []byte(fmt.Sprintf("content-%d", id))
+				store.Store(content) // Should not panic even during shutdown
+			}(i)
+		}
+		
+		// Close immediately to test shutdown race conditions
+		err = store.Close()
+		require.NoError(t, err)
+		
+		// Additional operations after close should fail gracefully, not panic
+		_, err = store.Store([]byte("after close"))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "store is closed")
+	})
+	
+	t.Run("Double_Close_Protection", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := NewBLAKE3Store(tempDir)
+		require.NoError(t, err)
+		
+		// First close should succeed
+		err = store.Close()
+		require.NoError(t, err)
+		
+		// Second close should not panic or error
+		err = store.Close()
+		require.NoError(t, err)
+		
+		// Third close should also be safe
+		err = store.Close()
+		require.NoError(t, err)
+	})
+	
+	t.Run("Graceful_Shutdown_With_Background_Writes", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := NewBLAKE3Store(tempDir)
+		require.NoError(t, err)
+		
+		// Start background operations that will queue writes
+		var hashes []types.Hash
+		for i := 0; i < 10; i++ {
+			content := []byte(fmt.Sprintf("background-content-%d", i))
+			hash, err := store.Store(content)
+			require.NoError(t, err)
+			hashes = append(hashes, hash)
+		}
+		
+		// Close should wait for background writes to complete
+		start := time.Now()
+		err = store.Close()
+		require.NoError(t, err)
+		closeTime := time.Since(start)
+		
+		// Should not take too long (background writes should complete quickly)
+		assert.Less(t, closeTime, 100*time.Millisecond, "Close took too long: %v", closeTime)
+		
+		// All files should be properly written
+		for i, hash := range hashes {
+			hashKey := fmt.Sprintf("%x", hash.Digest)
+			filePath := filepath.Join(tempDir, hashKey)
+			content, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			expected := []byte(fmt.Sprintf("background-content-%d", i))
+			assert.Equal(t, expected, content)
+		}
+	})
+	
+	t.Run("Atomic_Close_Flag_Race_Detection", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := NewBLAKE3Store(tempDir)
+		require.NoError(t, err)
+		
+		const numReaders = 50
+		const numWrites = 10
+		
+		var wg sync.WaitGroup
+		
+		// Start many goroutines checking if store is closed
+		for i := 0; i < numReaders; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < numWrites; j++ {
+					content := []byte(fmt.Sprintf("race-test-content-%d", j))
+					_, err := store.Store(content)
+					// Should either succeed or fail cleanly with "store is closed"
+					if err != nil {
+						assert.Contains(t, err.Error(), "store is closed")
+					}
+					time.Sleep(time.Microsecond) // Small delay to increase chance of race
+				}
+			}()
+		}
+		
+		// Close after a short delay
+		time.Sleep(5 * time.Millisecond)
+		err = store.Close()
+		require.NoError(t, err)
+		
+		wg.Wait()
 	})
 }
