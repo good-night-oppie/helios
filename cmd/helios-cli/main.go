@@ -16,46 +16,56 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"os"
+    "flag"
+    "fmt"
+    "os"
 
-	"github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+    "github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+)
+
+// Version metadata. Overridden at build time via -ldflags.
+var (
+    version = "dev"
+    commit  = "none"
+    date    = "unknown"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		return
-	}
-	switch os.Args[1] {
-	case "commit":
-		handleCommit()
-	case "restore":
-		handleRestore()
-	case "diff":
-		handleDiff()
-	case "materialize":
-		handleMaterialize()
-	case "stats":
-		handleStats()
-	case "-h", "--help", "help":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
-		usage()
-		os.Exit(2)
-	}
+    if len(os.Args) < 2 {
+        usage()
+        return
+    }
+    switch os.Args[1] {
+    case "commit":
+        handleCommit()
+    case "restore":
+        handleRestore()
+    case "diff":
+        handleDiff()
+    case "materialize":
+        handleMaterialize()
+    case "stats":
+        handleStats()
+    case "version", "--version", "-v":
+        handleVersion()
+    case "-h", "--help", "help":
+        usage()
+    default:
+        fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+        usage()
+        os.Exit(2)
+    }
 }
 
 func usage() {
-	fmt.Println(`helios-cli
+    fmt.Println(`helios-cli
 Commands:
   commit       --work <path>
   restore      --id <snapshotID>
   diff         --from <id> --to <id>
   materialize  --id <snapshotID> --out <dir> [--include <glob>] [--exclude <glob>]
-  stats`)
+  stats
+  version      [-v|--version]`)
 }
 
 // --- CLI configuration ---
@@ -125,10 +135,15 @@ func handleMaterialize() {
 }
 
 func handleStats() {
-	cfg := newConfig()
-	if err := cli.HandleStats(os.Stdout, cfg); err != nil {
-		die(err)
-	}
+    cfg := newConfig()
+    if err := cli.HandleStats(os.Stdout, cfg); err != nil {
+        die(err)
+    }
+}
+
+// handleVersion prints CLI version information.
+func handleVersion() {
+    fmt.Printf("helios %s (commit %s, built %s)\n", version, commit, date)
 }
 
 func die(err error) {
