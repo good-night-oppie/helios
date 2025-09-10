@@ -17,13 +17,17 @@
 package cas
 
 import (
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"lukechampine.com/blake3"
 )
 
@@ -31,6 +35,85 @@ import (
 type writeOp struct {
 	filePath string
 	content  []byte
+}
+
+// BLAKE3StoreConfig contains configuration options for BLAKE3Store
+type BLAKE3StoreConfig struct {
+	// Cache configuration
+	CacheSize int // Maximum number of items in LRU cache (default: 10000)
+	
+	// Queue configuration
+	WriteQueueSize int // Size of async write queue (default: 1000)
+	ErrorQueueSize int // Size of error queue (default: 100)
+	
+	// Logger configuration
+	Logger *slog.Logger // Optional structured logger (nil uses default stderr logging)
+	
+	// Performance configuration
+	HexBufferSize int // Pre-allocated buffer size for hex encoding (default: 64)
+}
+
+// BLAKE3StoreOption is a functional option for configuring BLAKE3Store
+type BLAKE3StoreOption func(*BLAKE3StoreConfig)
+
+// WithLogger sets a custom structured logger
+func WithLogger(logger *slog.Logger) BLAKE3StoreOption {
+	return func(cfg *BLAKE3StoreConfig) {
+		cfg.Logger = logger
+	}
+}
+
+// WithCacheSize sets the LRU cache size
+func WithCacheSize(size int) BLAKE3StoreOption {
+	return func(cfg *BLAKE3StoreConfig) {
+		cfg.CacheSize = size
+	}
+}
+
+// WithQueueSizes sets the write and error queue sizes
+func WithQueueSizes(writeQueue, errorQueue int) BLAKE3StoreOption {
+	return func(cfg *BLAKE3StoreConfig) {
+		cfg.WriteQueueSize = writeQueue
+		cfg.ErrorQueueSize = errorQueue
+	}
+}
+
+// BatchError accumulates multiple errors from batch operations
+type BatchError struct {
+	Errors []error
+	Count  int
+}
+
+// Error implements the error interface
+func (be *BatchError) Error() string {
+	if be.Count == 0 {
+		return "no errors"
+	}
+	if be.Count == 1 {
+		return be.Errors[0].Error()
+	}
+	return fmt.Sprintf("batch operation failed with %d errors: first error: %v", be.Count, be.Errors[0])
+}
+
+// Add adds an error to the batch
+func (be *BatchError) Add(err error) {
+	if err != nil {
+		be.Errors = append(be.Errors, err)
+		be.Count++
+	}
+}
+
+// HasErrors returns true if there are any errors
+func (be *BatchError) HasErrors() bool {
+	return be.Count > 0
+}
+
+// AsError returns the BatchError as an error if there are errors, nil otherwise
+func (be *BatchError) AsError() error {
+	if be.Count > 0 {
+		return be
+	}
+	return nil
 }
 
 // ContentAddressableStore defines the interface for content-addressable storage
@@ -59,13 +142,17 @@ type ContentAddressableStore interface {
 // - SIMD acceleration support
 type BLAKE3Store struct {
 	storePath   string
-	cache       map[string][]byte // L1 cache for hot content
-	mutex       sync.RWMutex      // Protects cache for concurrent access
+	cache       *lru.Cache[string, []byte] // L1 LRU cache with bounded memory usage
+	mutex       sync.RWMutex             // Protects cache for concurrent access
 	
 	// Performance optimizations from research phase
 	hasherPool  sync.Pool         // Pool of reusable BLAKE3 hashers
 	keyCache    map[string]string // Pre-computed hex keys for hot paths
 	keyMutex    sync.RWMutex      // Protects key cache
+	
+	// Production-grade logging and monitoring
+	logger      *slog.Logger      // Structured logger for production observability
+	hexBuffer   []byte            // Pre-allocated buffer for hex encoding performance
 	
 	// Ultra-performance optimizations for <70μs VST targets
 	memoryMode  bool              // Skip disk I/O for maximum performance
@@ -77,23 +164,56 @@ type BLAKE3Store struct {
 	shutdownMu  sync.RWMutex      // Protects against shutdown vs work addition race
 }
 
-// NewBLAKE3Store creates a new BLAKE3-based content-addressable store
-// storePath: directory for persistent storage
-func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
+// defaultConfig returns the default configuration for BLAKE3Store
+func defaultConfig() *BLAKE3StoreConfig {
+	return &BLAKE3StoreConfig{
+		CacheSize:      10000, // 10K items default LRU cache size
+		WriteQueueSize: 1000,  // 1K async write queue
+		ErrorQueueSize: 100,   // 100 error queue
+		Logger:         nil,   // Use default stderr logging
+		HexBufferSize:  64,    // 64 bytes for hex encoding buffer
+	}
+}
+
+// NewBLAKE3Store creates a new BLAKE3Store with optional configuration
+func NewBLAKE3Store(storePath string, opts ...BLAKE3StoreOption) (*BLAKE3Store, error) {
+	// Apply configuration options
+	cfg := defaultConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	
 	// Ensure storage directory exists
 	if err := os.MkdirAll(storePath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
-
+	
+	// Create LRU cache with configured size
+	cache, err := lru.New[string, []byte](cfg.CacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
+	}
+	
+	// Set up logger - use provided logger or create default
+	logger := cfg.Logger
+	if logger == nil {
+		// Create default structured logger that writes to stderr
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelWarn, // Only warn and above by default
+		}))
+	}
+	
 	store := &BLAKE3Store{
 		storePath:  storePath,
-		cache:      make(map[string][]byte),
+		cache:      cache,
 		keyCache:   make(map[string]string),
-		memoryMode: false, // Default to persistent mode
-		writeQueue: make(chan writeOp, 1000), // Buffered channel for async writes
-		errorQueue: make(chan error, 100),    // Buffered channel for errors
-		closed:     0,                        // Store is initially open
-		done:       make(chan struct{}),      // Done channel for shutdown coordination
+		logger:     logger,
+		hexBuffer:  make([]byte, cfg.HexBufferSize), // Pre-allocated hex buffer
+		memoryMode: false,                           // Default to persistent mode
+		writeQueue: make(chan writeOp, cfg.WriteQueueSize),
+		errorQueue: make(chan error, cfg.ErrorQueueSize),
+		closed:     0,                // Store is initially open
+		done:       make(chan struct{}), // Done channel for shutdown coordination
 	}
 	
 	// Initialize hasher pool for zero-allocation hashing
@@ -130,15 +250,20 @@ func (s *BLAKE3Store) backgroundWriter() {
 // errorHandler processes background write errors
 func (s *BLAKE3Store) errorHandler() {
 	for err := range s.errorQueue {
-		// Log error to stderr for proper error handling
-		// Using fmt.Fprintf to stderr instead of stdout for errors
-		fmt.Fprintf(os.Stderr, "[ERROR] BLAKE3Store background write failed: %v\n", err)
+		// Use structured logging for production-grade error reporting
+		s.logger.Error("BLAKE3Store background write failed",
+			"error", err,
+			"component", "blake3_store",
+			"operation", "background_write",
+			"store_path", s.storePath,
+			"timestamp", time.Now().UTC(),
+		)
 		
-		// TODO: In production, this should:
-		// 1. Log to proper logging system (slog, logrus, zap)
-		// 2. Implement retry logic with exponential backoff
-		// 3. Send metrics/alerts for monitoring
-		// 4. Consider circuit breaker pattern for persistent failures
+		// TODO: Future enhancements for production:
+		// 1. Implement retry logic with exponential backoff
+		// 2. Send metrics/alerts for monitoring integration
+		// 3. Consider circuit breaker pattern for persistent failures
+		// 4. Add structured context fields for better observability
 	}
 }
 
@@ -169,21 +294,22 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 		Digest:    digest,
 	}
 
-	// Pre-compute hash key once (use hex digest as key)
-	hashKey := fmt.Sprintf("%x", digest)
+	// Pre-compute hash key using optimized hex encoding
+	hashKey := s.hexEncode(digest)
 	
 	// Check if already exists to avoid duplicate work
 	s.mutex.RLock()
-	if _, exists := s.cache[hashKey]; exists {
+	if _, exists := s.cache.Get(hashKey); exists {
 		s.mutex.RUnlock()
 		return hash, nil // Content already stored
 	}
 	s.mutex.RUnlock()
 
-	// Store in cache for fast access (zero-copy when possible)
+	// Store in LRU cache for fast access with bounded memory usage
 	s.mutex.Lock()
-	s.cache[hashKey] = make([]byte, len(content))
-	copy(s.cache[hashKey], content)
+	cachedContent := make([]byte, len(content))
+	copy(cachedContent, content)
+	s.cache.Add(hashKey, cachedContent) // LRU will evict oldest if at capacity
 	s.mutex.Unlock()
 	
 	// Cache the hex key for future lookups
@@ -257,16 +383,20 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 			Algorithm: types.BLAKE3,
 			Digest:    digest,
 		}
-		hashKeys[i] = fmt.Sprintf("%x", digest)
+		hashKeys[i] = s.hexEncode(digest)
 	}
+	
+	// Initialize batch error tracking
+	batchErrors := &BatchError{}
 	
 	// Batch cache operations (single lock acquisition)
 	s.mutex.Lock()
 	for i, content := range contents {
 		hashKey := hashKeys[i]
-		if _, exists := s.cache[hashKey]; !exists {
-			s.cache[hashKey] = make([]byte, len(content))
-			copy(s.cache[hashKey], content)
+		if _, exists := s.cache.Get(hashKey); !exists {
+			cachedContent := make([]byte, len(content))
+			copy(cachedContent, content)
+			s.cache.Add(hashKey, cachedContent) // LRU handles eviction
 		}
 	}
 	s.mutex.Unlock()
@@ -291,8 +421,10 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 			
 			// Check if store is closed after acquiring lock
 			if atomic.LoadInt32(&s.closed) != 0 {
-				// Store is closed, write synchronously 
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				// Store is closed, write synchronously with error tracking
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					batchErrors.Add(fmt.Errorf("failed to write %s during shutdown: %w", hashKeys[i], err))
+				}
 				continue
 			}
 			
@@ -304,16 +436,31 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 			case <-s.done:
 				// Store is shutting down, decrement WaitGroup and fallback to sync write
 				s.wg.Done()
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode during shutdown
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					batchErrors.Add(fmt.Errorf("failed to write %s during shutdown: %w", hashKeys[i], err))
+				}
 			case s.writeQueue <- writeOp{filePath: filePath, content: content}:
 				// Successfully queued
 			default:
 				// Queue full, must call Done() since we already called Add()
 				s.wg.Done()
-				// Fallback to sync write
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				// Fallback to sync write with error tracking
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					batchErrors.Add(fmt.Errorf("failed to write %s (queue full): %w", hashKeys[i], err))
+				}
 			}
 		}
+	}
+	
+	// Return accumulated errors if any occurred
+	if batchError := batchErrors.AsError(); batchError != nil {
+		s.logger.Warn("StoreBatch completed with errors",
+			"error_count", batchErrors.Count,
+			"total_items", len(contents),
+			"component", "blake3_store",
+			"operation", "store_batch",
+		)
+		return hashes, batchError
 	}
 	
 	return hashes, nil
@@ -333,16 +480,16 @@ func (s *BLAKE3Store) Load(hash types.Hash) ([]byte, error) {
 	s.keyMutex.RUnlock()
 	
 	if !keyExists {
-		hashKey = fmt.Sprintf("%x", hash.Digest)
+		hashKey = s.hexEncode(hash.Digest)
 		// Cache the key for future lookups
 		s.keyMutex.Lock()
 		s.keyCache[digestStr] = hashKey
 		s.keyMutex.Unlock()
 	}
 
-	// Try cache first (L1 cache hit)
+	// Try LRU cache first (L1 cache hit)
 	s.mutex.RLock()
-	if content, exists := s.cache[hashKey]; exists {
+	if content, exists := s.cache.Get(hashKey); exists {
 		// Return copy to prevent external modification
 		result := make([]byte, len(content))
 		copy(result, content)
@@ -361,10 +508,11 @@ func (s *BLAKE3Store) Load(hash types.Hash) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read content from disk: %w", err)
 	}
 
-	// Cache for future access
+	// Cache for future access in LRU cache
 	s.mutex.Lock()
-	s.cache[hashKey] = make([]byte, len(content))
-	copy(s.cache[hashKey], content)
+	cachedContent := make([]byte, len(content))
+	copy(cachedContent, content)
+	s.cache.Add(hashKey, cachedContent) // LRU handles eviction automatically
 	s.mutex.Unlock()
 
 	return content, nil
@@ -383,16 +531,16 @@ func (s *BLAKE3Store) Exists(hash types.Hash) bool {
 	s.keyMutex.RUnlock()
 	
 	if !keyExists {
-		hashKey = fmt.Sprintf("%x", hash.Digest)
+		hashKey = s.hexEncode(hash.Digest)
 		// Cache for future lookups
 		s.keyMutex.Lock()
 		s.keyCache[digestStr] = hashKey
 		s.keyMutex.Unlock()
 	}
 
-	// Check cache first (fastest path) - should be <50μs
+	// Check LRU cache first (fastest path) - should be <50μs
 	s.mutex.RLock()
-	_, exists := s.cache[hashKey]
+	_, exists := s.cache.Get(hashKey)
 	s.mutex.RUnlock()
 	if exists {
 		return true
@@ -430,12 +578,30 @@ func (s *BLAKE3Store) Close() error {
 	
 	// Step 4: Clear caches to release memory
 	s.mutex.Lock()
-	s.cache = make(map[string][]byte)
+	s.cache.Purge() // Clear LRU cache
 	s.mutex.Unlock()
 	
 	s.keyMutex.Lock()
 	s.keyCache = make(map[string]string)
 	s.keyMutex.Unlock()
 	
+	// Log successful shutdown
+	s.logger.Info("BLAKE3Store shutdown completed",
+		"component", "blake3_store",
+		"operation", "shutdown",
+		"store_path", s.storePath,
+	)
+	
 	return nil
+}
+
+// hexEncode optimizes hex encoding using pre-allocated buffer when possible
+func (s *BLAKE3Store) hexEncode(data []byte) string {
+	// For small digests, use pre-allocated buffer for better performance
+	if len(data)*2 <= len(s.hexBuffer) {
+		n := hex.Encode(s.hexBuffer, data)
+		return string(s.hexBuffer[:n])
+	}
+	// Fall back to standard encoding for larger data
+	return hex.EncodeToString(data)
 }

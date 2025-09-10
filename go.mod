@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/cockroachdb/pebble v1.1.2
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/klauspost/compress v1.17.0
 	github.com/stretchr/testify v1.11.1
 	lukechampine.com/blake3 v1.4.1
