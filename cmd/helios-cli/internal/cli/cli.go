@@ -24,12 +24,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/good-night-oppie/helios-engine/internal/metrics"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
-	"github.com/good-night-oppie/helios-engine/pkg/cli"
+	"github.com/good-night-oppie/helios/internal/metrics"
+	"github.com/good-night-oppie/helios/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios/pkg/helios/objstore"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/vst"
+	"github.com/good-night-oppie/helios/pkg/cli"
 )
 
 // Engine interface for testability

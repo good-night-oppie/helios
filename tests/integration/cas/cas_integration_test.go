@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/cas"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/cas"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

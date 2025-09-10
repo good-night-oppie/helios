@@ -18,7 +18,7 @@ package vst
 import (
 	"fmt"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 // Diff compares two snapshots and returns Added/Changed/Deleted counts.

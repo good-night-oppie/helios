@@ -24,10 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios/pkg/helios/objstore"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/vst"
 )
 
 // ProductionMetrics represents real production workload metrics

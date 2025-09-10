@@ -21,10 +21,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios/pkg/helios/objstore"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/vst"
 )
 
 // Test scenario 1: Commit data and verify it's written to L2

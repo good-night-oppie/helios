@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/vst"
 )
 
 // BenchmarkCommitPerformance tests VST commit performance across different scenarios

@@ -19,10 +19,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
+	"github.com/good-night-oppie/helios/pkg/helios/vst"
 	"unicode/utf8"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 func FuzzPathRoundTrip(f *testing.F) {

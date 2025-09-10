@@ -19,9 +19,9 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/internal/util"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/internal/util"
+	"github.com/good-night-oppie/helios/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 func hOf(t *testing.T, b []byte) types.Hash {

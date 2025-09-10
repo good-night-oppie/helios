@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 // HashBlob computes the content-addressed hash of a file blob.

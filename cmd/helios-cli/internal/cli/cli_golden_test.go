@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/l1cache"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/l1cache"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 var updateGolden = flag.Bool("update", false, "update golden files")

@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/stress"
+	"github.com/good-night-oppie/helios/stress"
 )
 
 // MetricsServer serves real-time metrics for demo visualization
