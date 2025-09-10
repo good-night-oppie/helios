@@ -17,13 +17,14 @@
 package cas
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 	"lukechampine.com/blake3"
 )
 
@@ -68,13 +69,14 @@ type BLAKE3Store struct {
 	keyMutex    sync.RWMutex      // Protects key cache
 	
 	// Ultra-performance optimizations for <70μs VST targets
-	memoryMode  bool              // Skip disk I/O for maximum performance
-	writeQueue  chan writeOp      // Async write queue for background persistence
-	errorQueue  chan error        // Channel for background write errors
-	wg          sync.WaitGroup    // Wait group for background writes
-	closed      int32             // Atomic flag to track if store is closed (0=open, 1=closed)
-	done        chan struct{}     // Signal channel for graceful shutdown coordination
-	shutdownMu  sync.RWMutex      // Protects against shutdown vs work addition race
+	memoryMode     bool              // Skip disk I/O for maximum performance
+	writeQueue     chan writeOp      // Async write queue for background persistence
+	errorQueue     chan error        // Channel for background write errors
+	wg             sync.WaitGroup    // Wait group for background writes
+	closed         int32             // Atomic flag to track if store is closed (0=open, 1=closed)
+	done           chan struct{}     // Signal channel for graceful shutdown coordination
+	shutdownMu     sync.RWMutex      // Protects against shutdown vs work addition race
+	hexBufferPool  sync.Pool         // Thread-safe hex encoding buffer pool
 }
 
 // NewBLAKE3Store creates a new BLAKE3-based content-addressable store
@@ -103,6 +105,13 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 		},
 	}
 	
+	// Initialize hex buffer pool for thread-safe hex encoding
+	store.hexBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 64) // 32-byte hash * 2 for hex encoding
+		},
+	}
+	
 	// Start background writer goroutine
 	go store.backgroundWriter()
 	
@@ -110,6 +119,14 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 	go store.errorHandler()
 	
 	return store, nil
+}
+
+// hexEncode provides thread-safe hex encoding using pooled buffers
+func (s *BLAKE3Store) hexEncode(data []byte) string {
+	buf := s.hexBufferPool.Get().([]byte)
+	defer s.hexBufferPool.Put(buf)
+	n := hex.Encode(buf, data)
+	return string(buf[:n])
 }
 
 // backgroundWriter handles async disk writes for maximum performance
@@ -169,8 +186,8 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 		Digest:    digest,
 	}
 
-	// Pre-compute hash key once (use hex digest as key)
-	hashKey := fmt.Sprintf("%x", digest)
+	// Pre-compute hash key once using thread-safe hex encoding
+	hashKey := s.hexEncode(digest)
 	
 	// Check if already exists to avoid duplicate work
 	s.mutex.RLock()
@@ -257,7 +274,7 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 			Algorithm: types.BLAKE3,
 			Digest:    digest,
 		}
-		hashKeys[i] = fmt.Sprintf("%x", digest)
+		hashKeys[i] = s.hexEncode(digest)
 	}
 	
 	// Batch cache operations (single lock acquisition)
@@ -333,7 +350,7 @@ func (s *BLAKE3Store) Load(hash types.Hash) ([]byte, error) {
 	s.keyMutex.RUnlock()
 	
 	if !keyExists {
-		hashKey = fmt.Sprintf("%x", hash.Digest)
+		hashKey = s.hexEncode(hash.Digest)
 		// Cache the key for future lookups
 		s.keyMutex.Lock()
 		s.keyCache[digestStr] = hashKey
@@ -383,7 +400,7 @@ func (s *BLAKE3Store) Exists(hash types.Hash) bool {
 	s.keyMutex.RUnlock()
 	
 	if !keyExists {
-		hashKey = fmt.Sprintf("%x", hash.Digest)
+		hashKey = s.hexEncode(hash.Digest)
 		// Cache for future lookups
 		s.keyMutex.Lock()
 		s.keyCache[digestStr] = hashKey
