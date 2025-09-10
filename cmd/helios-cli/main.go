@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package main
 
 import (
@@ -21,6 +20,13 @@ import (
 	"os"
 
 	"github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+)
+
+// Version metadata. Overridden at build time via -ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 func main() {
@@ -39,6 +45,8 @@ func main() {
 		handleMaterialize()
 	case "stats":
 		handleStats()
+	case "version", "--version", "-v":
+		handleVersion()
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -49,13 +57,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`helios-cli
+	fmt.Println(`helios
 Commands:
   commit       --work <path>
   restore      --id <snapshotID>
   diff         --from <id> --to <id>
   materialize  --id <snapshotID> --out <dir> [--include <glob>] [--exclude <glob>]
-  stats`)
+  stats
+  version      [-v|--version]`)
 }
 
 // --- CLI configuration ---
@@ -129,6 +138,11 @@ func handleStats() {
 	if err := cli.HandleStats(os.Stdout, cfg); err != nil {
 		die(err)
 	}
+}
+
+// handleVersion prints CLI version information.
+func handleVersion() {
+	fmt.Printf("helios %s (commit %s, built %s)\n", version, commit, date)
 }
 
 func die(err error) {
