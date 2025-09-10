@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"lukechampine.com/blake3"
 )
@@ -146,13 +146,13 @@ type BLAKE3Store struct {
 	mutex       sync.RWMutex             // Protects cache for concurrent access
 	
 	// Performance optimizations from research phase
-	hasherPool  sync.Pool         // Pool of reusable BLAKE3 hashers
-	keyCache    map[string]string // Pre-computed hex keys for hot paths
-	keyMutex    sync.RWMutex      // Protects key cache
+	hasherPool     sync.Pool         // Pool of reusable BLAKE3 hashers
+	hexBufferPool  sync.Pool         // Pool of reusable hex encoding buffers
+	keyCache       map[string]string // Pre-computed hex keys for hot paths
+	keyMutex       sync.RWMutex      // Protects key cache
 	
 	// Production-grade logging and monitoring
-	logger      *slog.Logger      // Structured logger for production observability
-	hexBuffer   []byte            // Pre-allocated buffer for hex encoding performance
+	logger         *slog.Logger      // Structured logger for production observability
 	
 	// Ultra-performance optimizations for <70μs VST targets
 	memoryMode  bool              // Skip disk I/O for maximum performance
@@ -208,7 +208,6 @@ func NewBLAKE3Store(storePath string, opts ...BLAKE3StoreOption) (*BLAKE3Store, 
 		cache:      cache,
 		keyCache:   make(map[string]string),
 		logger:     logger,
-		hexBuffer:  make([]byte, cfg.HexBufferSize), // Pre-allocated hex buffer
 		memoryMode: false,                           // Default to persistent mode
 		writeQueue: make(chan writeOp, cfg.WriteQueueSize),
 		errorQueue: make(chan error, cfg.ErrorQueueSize),
@@ -220,6 +219,13 @@ func NewBLAKE3Store(storePath string, opts ...BLAKE3StoreOption) (*BLAKE3Store, 
 	store.hasherPool = sync.Pool{
 		New: func() interface{} {
 			return blake3.New(32, nil) // Pre-configured 256-bit unkeyed hasher
+		},
+	}
+	
+	// Initialize hex buffer pool for race-free hex encoding
+	store.hexBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, cfg.HexBufferSize) // Pre-allocated hex buffer
 		},
 	}
 	
@@ -595,12 +601,16 @@ func (s *BLAKE3Store) Close() error {
 	return nil
 }
 
-// hexEncode optimizes hex encoding using pre-allocated buffer when possible
+// hexEncode optimizes hex encoding using pooled buffer for race-free performance
 func (s *BLAKE3Store) hexEncode(data []byte) string {
-	// For small digests, use pre-allocated buffer for better performance
-	if len(data)*2 <= len(s.hexBuffer) {
-		n := hex.Encode(s.hexBuffer, data)
-		return string(s.hexBuffer[:n])
+	// Get buffer from pool for race-free encoding
+	hexBuffer := s.hexBufferPool.Get().([]byte)
+	defer s.hexBufferPool.Put(hexBuffer)
+	
+	// For small digests, use pooled buffer for better performance
+	if len(data)*2 <= len(hexBuffer) {
+		n := hex.Encode(hexBuffer, data)
+		return string(hexBuffer[:n])
 	}
 	// Fall back to standard encoding for larger data
 	return hex.EncodeToString(data)

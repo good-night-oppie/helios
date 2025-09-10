@@ -1,4 +1,4 @@
-module github.com/good-night-oppie/helios-engine
+module github.com/good-night-oppie/helios
 
 go 1.22
 
