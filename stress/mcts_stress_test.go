@@ -29,19 +29,6 @@ import (
 	"github.com/good-night-oppie/helios-engine/pkg/helios/vst"
 )
 
-// MCTSMetrics tracks performance metrics for demo
-type MCTSMetrics struct {
-	SimulationsPerSecond int64
-	CommitsPerSecond     int64
-	AvgLatencyMicros     int64
-	P50LatencyMicros     int64
-	P99LatencyMicros     int64
-	MemoryUsedBytes      int64
-	StatesStored         int64
-	CacheHitRate         float64
-	ParallelTrees        int
-}
-
 // BenchmarkAlphaGoWorkload simulates AlphaGo-level MCTS workload
 // Target: 1,600 simulations per move, 800-1000 parallel trees
 func BenchmarkAlphaGoWorkload(b *testing.B) {
@@ -322,21 +309,5 @@ func sortLatencies(latencies []int64) {
 			j--
 		}
 		latencies[j+1] = key
-	}
-}
-
-// GenerateDemoMetrics creates impressive metrics for TED demo
-func GenerateDemoMetrics() *MCTSMetrics {
-	// Run quick benchmarks and return results
-	return &MCTSMetrics{
-		SimulationsPerSecond: 15000,  // Target: beat AlphaGo's 1600
-		CommitsPerSecond:     10000,  // Target: 10K+
-		AvgLatencyMicros:     85,     // Target: <100μs
-		P50LatencyMicros:     72,     // Even better p50
-		P99LatencyMicros:     180,    // Still under 200μs
-		MemoryUsedBytes:      100<<20, // 100MB for 1M states
-		StatesStored:         1000000,
-		CacheHitRate:         0.95,   // 95% L1 hits
-		ParallelTrees:        1000,   // Massive parallelism
 	}
 }
