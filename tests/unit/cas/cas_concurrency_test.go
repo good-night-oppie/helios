@@ -40,17 +40,17 @@ func TestBLAKE3Store_Concurrency(t *testing.T) {
 	t.Run("Concurrent_Store_Operations", func(t *testing.T) {
 		concurrency := 10
 		contentCount := 100
-		
+
 		// Generate unique content for each goroutine
 		allContent := make([][]byte, concurrency*contentCount)
 		for i := range allContent {
 			allContent[i] = []byte(fmt.Sprintf("concurrent_content_%d", i))
 		}
-		
+
 		// Channel to collect results
 		results := make(chan types.Hash, len(allContent))
 		errors := make(chan error, len(allContent))
-		
+
 		// Launch concurrent store operations
 		for i := 0; i < concurrency; i++ {
 			go func(startIdx int) {
@@ -65,11 +65,11 @@ func TestBLAKE3Store_Concurrency(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		// Collect results - map hash to original content for verification
 		hashToContent := make(map[string][]byte)
 		var hashes []types.Hash
-		
+
 		for i := 0; i < len(allContent); i++ {
 			select {
 			case hash := <-results:
@@ -80,9 +80,9 @@ func TestBLAKE3Store_Concurrency(t *testing.T) {
 				t.Fatal("Timeout waiting for concurrent operations")
 			}
 		}
-		
+
 		assert.Len(t, hashes, len(allContent))
-		
+
 		// Create expected content map by storing each content piece
 		for _, content := range allContent {
 			tempHash, err := store.Store(content)
@@ -90,12 +90,12 @@ func TestBLAKE3Store_Concurrency(t *testing.T) {
 			hashKey := fmt.Sprintf("%x", tempHash.Digest)
 			hashToContent[hashKey] = content
 		}
-		
+
 		// Verify all stored content can be retrieved correctly
 		for _, hash := range hashes {
 			retrieved, err := store.Load(hash)
 			require.NoError(t, err)
-			
+
 			hashKey := fmt.Sprintf("%x", hash.Digest)
 			expectedContent, exists := hashToContent[hashKey]
 			require.True(t, exists, "Hash should exist in expected content map")
@@ -110,13 +110,13 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
-		
+
 		const numGoroutines = 100
 		const opsPerGoroutine = 10
-		
+
 		var wg sync.WaitGroup
 		wg.Add(numGoroutines)
-		
+
 		// Start concurrent store operations
 		for i := 0; i < numGoroutines; i++ {
 			go func(id int) {
@@ -131,69 +131,75 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		// Allow some operations to start
 		time.Sleep(10 * time.Millisecond)
-		
+
 		// Close the store while operations are running
 		err = store.Close()
 		require.NoError(t, err)
-		
+
 		// Wait for all goroutines to complete
 		wg.Wait()
-		
+
 		// Verify store is properly closed
 		_, err = store.Store([]byte("should fail"))
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "store is closed")
 	})
-	
+
 	t.Run("No_Send_On_Closed_Channel_Panic", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
-		
+
 		// Fill the write queue to trigger fallback paths
+		var wg sync.WaitGroup
 		for i := 0; i < 1100; i++ { // More than buffer size (1000)
+			wg.Add(1)
 			go func(id int) {
+				defer wg.Done()
 				content := []byte(fmt.Sprintf("content-%d", id))
 				store.Store(content) // Should not panic even during shutdown
 			}(i)
 		}
-		
+
 		// Close immediately to test shutdown race conditions
 		err = store.Close()
 		require.NoError(t, err)
-		
+
+		// Ensure all goroutines have completed to avoid TempDir cleanup issues
+		wg.Wait()
+
 		// Additional operations after close should fail gracefully, not panic
 		_, err = store.Store([]byte("after close"))
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "store is closed")
 	})
-	
+
 	t.Run("Double_Close_Protection", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
-		
+
 		// First close should succeed
 		err = store.Close()
 		require.NoError(t, err)
-		
+
 		// Second close should not panic or error
 		err = store.Close()
 		require.NoError(t, err)
-		
+
 		// Third close should also be safe
 		err = store.Close()
 		require.NoError(t, err)
 	})
-	
+
 	t.Run("Graceful_Shutdown_With_Background_Writes", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
-		
+
 		// Start background operations that will queue writes
 		var hashes []types.Hash
 		for i := 0; i < 10; i++ {
@@ -202,16 +208,16 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 			require.NoError(t, err)
 			hashes = append(hashes, hash)
 		}
-		
+
 		// Close should wait for background writes to complete
 		start := time.Now()
 		err = store.Close()
 		require.NoError(t, err)
 		closeTime := time.Since(start)
-		
+
 		// Should not take too long (background writes should complete quickly)
 		assert.Less(t, closeTime, 100*time.Millisecond, "Close took too long: %v", closeTime)
-		
+
 		// All files should be properly written
 		for i, hash := range hashes {
 			hashKey := fmt.Sprintf("%x", hash.Digest)
@@ -222,17 +228,17 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 			assert.Equal(t, expected, content)
 		}
 	})
-	
+
 	t.Run("Atomic_Close_Flag_Race_Detection", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
-		
+
 		const numReaders = 50
 		const numWrites = 10
-		
+
 		var wg sync.WaitGroup
-		
+
 		// Start many goroutines checking if store is closed
 		for i := 0; i < numReaders; i++ {
 			wg.Add(1)
@@ -249,12 +255,12 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 				}
 			}()
 		}
-		
+
 		// Close after a short delay
 		time.Sleep(5 * time.Millisecond)
 		err = store.Close()
 		require.NoError(t, err)
-		
+
 		wg.Wait()
 	})
 }

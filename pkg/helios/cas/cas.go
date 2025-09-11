@@ -42,7 +42,7 @@ type ContentAddressableStore interface {
 	Store(content []byte) (types.Hash, error)
 
 	// Load retrieves content by its hash
-	// Performance target: <5ms for typical code file sizes  
+	// Performance target: <5ms for typical code file sizes
 	Load(hash types.Hash) ([]byte, error)
 
 	// Exists checks if content with given hash exists
@@ -56,27 +56,27 @@ type ContentAddressableStore interface {
 // BLAKE3Store implements ContentAddressableStore using BLAKE3 hashing
 // Based on research findings showing BLAKE3's superior performance characteristics:
 // - ~15 GB/s throughput with AVX2
-// - <100ns latency for small inputs  
+// - <100ns latency for small inputs
 // - SIMD acceleration support
 type BLAKE3Store struct {
-	storePath   string
-	cache       map[string][]byte // L1 cache for hot content
-	mutex       sync.RWMutex      // Protects cache for concurrent access
-	
+	storePath string
+	cache     map[string][]byte // L1 cache for hot content
+	mutex     sync.RWMutex      // Protects cache for concurrent access
+
 	// Performance optimizations from research phase
-	hasherPool  sync.Pool         // Pool of reusable BLAKE3 hashers
-	keyCache    map[string]string // Pre-computed hex keys for hot paths
-	keyMutex    sync.RWMutex      // Protects key cache
-	
+	hasherPool sync.Pool         // Pool of reusable BLAKE3 hashers
+	keyCache   map[string]string // Pre-computed hex keys for hot paths
+	keyMutex   sync.RWMutex      // Protects key cache
+
 	// Ultra-performance optimizations for <70μs VST targets
-	memoryMode     bool              // Skip disk I/O for maximum performance
-	writeQueue     chan writeOp      // Async write queue for background persistence
-	errorQueue     chan error        // Channel for background write errors
-	wg             sync.WaitGroup    // Wait group for background writes
-	closed         int32             // Atomic flag to track if store is closed (0=open, 1=closed)
-	done           chan struct{}     // Signal channel for graceful shutdown coordination
-	shutdownMu     sync.RWMutex      // Protects against shutdown vs work addition race
-	hexBufferPool  sync.Pool         // Thread-safe hex encoding buffer pool
+	memoryMode    bool           // Skip disk I/O for maximum performance
+	writeQueue    chan writeOp   // Async write queue for background persistence
+	errorQueue    chan error     // Channel for background write errors
+	wg            sync.WaitGroup // Wait group for background writes
+	closed        int32          // Atomic flag to track if store is closed (0=open, 1=closed)
+	done          chan struct{}  // Signal channel for graceful shutdown coordination
+	shutdownMu    sync.RWMutex   // Protects against shutdown vs work addition race
+	hexBufferPool sync.Pool      // Thread-safe hex encoding buffer pool
 }
 
 // NewBLAKE3Store creates a new BLAKE3-based content-addressable store
@@ -91,33 +91,33 @@ func NewBLAKE3Store(storePath string) (*BLAKE3Store, error) {
 		storePath:  storePath,
 		cache:      make(map[string][]byte),
 		keyCache:   make(map[string]string),
-		memoryMode: false, // Default to persistent mode
+		memoryMode: false,                    // Default to persistent mode
 		writeQueue: make(chan writeOp, 1000), // Buffered channel for async writes
 		errorQueue: make(chan error, 100),    // Buffered channel for errors
 		closed:     0,                        // Store is initially open
 		done:       make(chan struct{}),      // Done channel for shutdown coordination
 	}
-	
+
 	// Initialize hasher pool for zero-allocation hashing
 	store.hasherPool = sync.Pool{
 		New: func() interface{} {
 			return blake3.New(32, nil) // Pre-configured 256-bit unkeyed hasher
 		},
 	}
-	
+
 	// Initialize hex buffer pool for thread-safe hex encoding
 	store.hexBufferPool = sync.Pool{
 		New: func() interface{} {
 			return make([]byte, 64) // 32-byte hash * 2 for hex encoding
 		},
 	}
-	
+
 	// Start background writer goroutine
 	go store.backgroundWriter()
-	
+
 	// Start error handler goroutine
 	go store.errorHandler()
-	
+
 	return store, nil
 }
 
@@ -150,7 +150,7 @@ func (s *BLAKE3Store) errorHandler() {
 		// Log error to stderr for proper error handling
 		// Using fmt.Fprintf to stderr instead of stdout for errors
 		fmt.Fprintf(os.Stderr, "[ERROR] BLAKE3Store background write failed: %v\n", err)
-		
+
 		// TODO: In production, this should:
 		// 1. Log to proper logging system (slog, logrus, zap)
 		// 2. Implement retry logic with exponential backoff
@@ -188,7 +188,7 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 
 	// Pre-compute hash key once using thread-safe hex encoding
 	hashKey := s.hexEncode(digest)
-	
+
 	// Check if already exists to avoid duplicate work
 	s.mutex.RLock()
 	if _, exists := s.cache[hashKey]; exists {
@@ -202,7 +202,7 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 	s.cache[hashKey] = make([]byte, len(content))
 	copy(s.cache[hashKey], content)
 	s.mutex.Unlock()
-	
+
 	// Cache the hex key for future lookups
 	s.keyMutex.Lock()
 	s.keyCache[string(digest)] = hashKey
@@ -211,40 +211,44 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 	// Store persistently to disk - async for performance or skip in memory mode
 	if !s.memoryMode {
 		filePath := filepath.Join(s.storePath, hashKey)
-		
+
 		// Use read lock to prevent race between shutdown and work addition
 		s.shutdownMu.RLock()
 		defer s.shutdownMu.RUnlock()
-		
+
 		// Check if store is closed after acquiring lock
 		if atomic.LoadInt32(&s.closed) != 0 {
-			// Store is closed, write synchronously 
+			// Store is closed, write synchronously
 			if err := os.WriteFile(filePath, content, 0644); err != nil {
 				return hash, fmt.Errorf("failed to write content to disk (store closed): %w", err)
 			}
 			return hash, nil
 		}
-		
+
 		// Critical: Add to WaitGroup BEFORE attempting to send to channel
 		// to prevent race condition where Done() is called before Add()
 		// We hold shutdownMu.RLock so Close() cannot proceed until we're done
 		s.wg.Add(1)
-		
+
+		// Make defensive copy before queuing to prevent caller mutations
+		dataCopy := make([]byte, len(content))
+		copy(dataCopy, content)
+
 		// Use async writes for better performance with graceful shutdown protection
 		select {
 		case <-s.done:
 			// Store is shutting down, decrement WaitGroup and fallback to sync write
 			s.wg.Done()
-			if err := os.WriteFile(filePath, content, 0644); err != nil {
+			if err := os.WriteFile(filePath, dataCopy, 0644); err != nil {
 				return hash, fmt.Errorf("failed to write content to disk during shutdown: %w", err)
 			}
-		case s.writeQueue <- writeOp{filePath: filePath, content: content}:
+		case s.writeQueue <- writeOp{filePath: filePath, content: dataCopy}:
 			// Successfully queued for background write
 		default:
 			// Queue full, must call Done() since we already called Add()
 			s.wg.Done()
 			// Write synchronously as fallback
-			if err := os.WriteFile(filePath, content, 0644); err != nil {
+			if err := os.WriteFile(filePath, dataCopy, 0644); err != nil {
 				return hash, fmt.Errorf("failed to write content to disk: %w", err)
 			}
 		}
@@ -257,10 +261,10 @@ func (s *BLAKE3Store) Store(content []byte) (types.Hash, error) {
 // Designed for VST commit scenarios requiring <70μs for 50 files
 func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 	hashes := make([]types.Hash, len(contents))
-	
+
 	// Pre-allocate maps to avoid repeated allocations
 	hashKeys := make([]string, len(contents))
-	
+
 	// Process all hashes first (CPU-bound, can be optimized)
 	for i, content := range contents {
 		// Get hasher from pool for zero allocation
@@ -269,14 +273,14 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 		digest := hasher.Sum(nil)
 		hasher.Reset()
 		s.hasherPool.Put(hasher)
-		
+
 		hashes[i] = types.Hash{
 			Algorithm: types.BLAKE3,
 			Digest:    digest,
 		}
 		hashKeys[i] = s.hexEncode(digest)
 	}
-	
+
 	// Batch cache operations (single lock acquisition)
 	s.mutex.Lock()
 	for i, content := range contents {
@@ -287,7 +291,7 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 		}
 	}
 	s.mutex.Unlock()
-	
+
 	// Batch key cache operations
 	s.keyMutex.Lock()
 	for i, hash := range hashes {
@@ -295,44 +299,50 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 		s.keyCache[digestStr] = hashKeys[i]
 	}
 	s.keyMutex.Unlock()
-	
+
 	// Handle persistence based on mode
 	if !s.memoryMode {
 		// Use read lock to prevent race between shutdown and work addition
 		s.shutdownMu.RLock()
 		defer s.shutdownMu.RUnlock()
-		
+
 		// Queue all writes together for better batching
 		for i, content := range contents {
 			filePath := filepath.Join(s.storePath, hashKeys[i])
-			
+
 			// Check if store is closed after acquiring lock
 			if atomic.LoadInt32(&s.closed) != 0 {
-				// Store is closed, write synchronously 
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				// Store is closed, write synchronously
+				dataCopy := make([]byte, len(content))
+				copy(dataCopy, content)
+				os.WriteFile(filePath, dataCopy, 0644) // Ignore error in batch mode
 				continue
 			}
-			
+
+			// Make defensive copy before queuing to prevent caller mutations
+			dataCopy := make([]byte, len(content))
+			copy(dataCopy, content)
+
 			// Critical: Add to WaitGroup BEFORE attempting to send to channel
 			// We hold shutdownMu.RLock so Close() cannot proceed until we're done
 			s.wg.Add(1)
-			
+
 			select {
 			case <-s.done:
 				// Store is shutting down, decrement WaitGroup and fallback to sync write
 				s.wg.Done()
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode during shutdown
-			case s.writeQueue <- writeOp{filePath: filePath, content: content}:
+				os.WriteFile(filePath, dataCopy, 0644) // Ignore error in batch mode during shutdown
+			case s.writeQueue <- writeOp{filePath: filePath, content: dataCopy}:
 				// Successfully queued
 			default:
 				// Queue full, must call Done() since we already called Add()
 				s.wg.Done()
 				// Fallback to sync write
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				os.WriteFile(filePath, dataCopy, 0644) // Ignore error in batch mode
 			}
 		}
 	}
-	
+
 	return hashes, nil
 }
 
@@ -348,7 +358,7 @@ func (s *BLAKE3Store) Load(hash types.Hash) ([]byte, error) {
 	s.keyMutex.RLock()
 	hashKey, keyExists := s.keyCache[digestStr]
 	s.keyMutex.RUnlock()
-	
+
 	if !keyExists {
 		hashKey = s.hexEncode(hash.Digest)
 		// Cache the key for future lookups
@@ -398,7 +408,7 @@ func (s *BLAKE3Store) Exists(hash types.Hash) bool {
 	s.keyMutex.RLock()
 	hashKey, keyExists := s.keyCache[digestStr]
 	s.keyMutex.RUnlock()
-	
+
 	if !keyExists {
 		hashKey = s.hexEncode(hash.Digest)
 		// Cache for future lookups
@@ -427,32 +437,32 @@ func (s *BLAKE3Store) Close() error {
 	if !atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
 		return nil // Already closed
 	}
-	
+
 	// Step 1: Signal shutdown to prevent new operations from starting
 	// This must be done BEFORE waiting for existing operations
 	close(s.done)
-	
+
 	// Step 2: Acquire write lock to prevent new work from being added to WaitGroup
 	// All Store operations must complete their WaitGroup.Add before we can proceed
 	s.shutdownMu.Lock()
 	defer s.shutdownMu.Unlock()
-	
+
 	// Step 3: Wait for any in-flight operations to complete
 	// Background goroutines will see done channel closed and exit cleanly
 	s.wg.Wait()
-	
+
 	// Step 3: Now safe to close channels - no more sends will occur
 	close(s.writeQueue)
 	close(s.errorQueue)
-	
+
 	// Step 4: Clear caches to release memory
 	s.mutex.Lock()
 	s.cache = make(map[string][]byte)
 	s.mutex.Unlock()
-	
+
 	s.keyMutex.Lock()
 	s.keyCache = make(map[string]string)
 	s.keyMutex.Unlock()
-	
+
 	return nil
 }

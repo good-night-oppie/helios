@@ -14,6 +14,8 @@
 
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build stress
+
 package stress
 
 // MCTSMetrics tracks performance metrics for demo
@@ -32,14 +34,14 @@ type MCTSMetrics struct {
 // GenerateDemoMetrics creates impressive metrics for TED demo
 func GenerateDemoMetrics() *MCTSMetrics {
 	return &MCTSMetrics{
-		SimulationsPerSecond: 15000,  // 9.4x faster than AlphaGo (1,600 sims/s)
-		CommitsPerSecond:     10000,  // Sustained high throughput
-		AvgLatencyMicros:     85,     // Average VST commit latency
-		P50LatencyMicros:     72,     // Median latency
-		P99LatencyMicros:     180,    // 99th percentile
+		SimulationsPerSecond: 15000,     // 9.4x faster than AlphaGo (1,600 sims/s)
+		CommitsPerSecond:     10000,     // Sustained high throughput
+		AvgLatencyMicros:     85,        // Average VST commit latency
+		P50LatencyMicros:     72,        // Median latency
+		P99LatencyMicros:     180,       // 99th percentile
 		MemoryUsedBytes:      100 << 20, // 100MB for 1M states (100 bytes/state)
-		StatesStored:         1000000,    // 1M states
-		CacheHitRate:         95.0,       // 95% L1 cache hit rate
-		ParallelTrees:        1000,       // Zero lock contention
+		StatesStored:         1000000,   // 1M states
+		CacheHitRate:         95.0,      // 95% L1 cache hit rate
+		ParallelTrees:        1000,      // Zero lock contention
 	}
 }
