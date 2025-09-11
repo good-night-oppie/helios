@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package vst
 
 import (
@@ -22,7 +21,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"strings"
 )
 
 // Materialize writes the files from a snapshot to a real directory on disk.
@@ -122,16 +123,13 @@ func shouldMaterialize(path string, opts types.MatOpts) bool {
 	return true
 }
 
-// matchGlob checks if a path matches a glob pattern
-// Supports simple patterns like "src/**" or "*.go"
+// matchGlob checks if a path matches a glob pattern using doublestar for ** support
 func matchGlob(path, pattern string) bool {
-	// Handle ** for recursive matching
-	if len(pattern) > 2 && pattern[len(pattern)-2:] == "**" {
-		prefix := pattern[:len(pattern)-2]
-		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+	path = strings.ReplaceAll(path, "\\", "/")
+	pattern = strings.ReplaceAll(pattern, "\\", "/")
+	matched, err := doublestar.PathMatch(pattern, path)
+	if err != nil {
+		return false
 	}
-
-	// Use filepath.Match for other patterns
-	matched, _ := filepath.Match(pattern, path)
 	return matched
 }

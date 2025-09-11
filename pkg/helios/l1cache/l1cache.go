@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package l1cache
 
 import (
@@ -58,6 +57,8 @@ type cache struct {
 
 	enc       *zstd.Encoder
 	dec       *zstd.Decoder
+	encMu     sync.Mutex
+	decMu     sync.Mutex
 	threshold int
 
 	stats CacheStats
@@ -95,10 +96,12 @@ func (c *cache) Put(h types.Hash, raw []byte) (int, bool) {
 	k := c.key(h)
 	var store []byte
 	compressed := false
-	
+
 	// Compress data if appropriate
 	if c.threshold <= 0 || len(raw) >= c.threshold {
+		c.encMu.Lock()
 		comp := c.enc.EncodeAll(raw, nil)
+		c.encMu.Unlock()
 		if len(comp) < len(raw) {
 			store = comp
 			compressed = true
@@ -161,25 +164,37 @@ func (c *cache) Get(h types.Hash) ([]byte, bool) {
 		return nil, false
 	}
 
-	// Copy entry data while locked
 	data := make([]byte, len(ent.data))
 	copy(data, ent.data)
 	compressed := ent.compressed
-	c.stats.Hits++ // Update hit counter while locked
 	c.mu.Unlock()
 
-	// Decompress if needed (outside lock)
 	if compressed {
+		c.decMu.Lock()
 		dec, err := c.dec.DecodeAll(data, nil)
+		c.decMu.Unlock()
 		if err != nil {
 			c.mu.Lock()
-			c.stats.Misses++ // Count decompression failure as miss
+			if cur, exists := c.entries[k]; exists {
+				c.sizeBytes -= int64(len(cur.data))
+				c.deleteFromOrder(k)
+				delete(c.entries, k)
+				c.stats.Items--
+				c.stats.SizeBytes = uint64(c.sizeBytes)
+			}
+			c.stats.Misses++
 			c.mu.Unlock()
 			return nil, false
 		}
+		c.mu.Lock()
+		c.stats.Hits++
+		c.mu.Unlock()
 		return dec, true
 	}
 
+	c.mu.Lock()
+	c.stats.Hits++
+	c.mu.Unlock()
 	return data, true
 }
 

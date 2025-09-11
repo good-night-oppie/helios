@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package metrics
 
 import (
@@ -22,23 +21,31 @@ import (
 
 // EngineMetrics collects minimal metrics for Helios Day 8.
 // Keep it tiny and lock-based to avoid allocation-heavy deps.
+const maxCommitLatencySamples = 1024
+
 type EngineMetrics struct {
 	mu sync.Mutex
 
-	commitUS   []int64 // microseconds for commits (append-only)
+	commitUS   []int64
+	next       int
+	count      int
 	newObjects uint64
 	newBytes   uint64
 }
 
 func NewEngineMetrics() *EngineMetrics {
 	return &EngineMetrics{
-		commitUS: make([]int64, 0, 1024),
+		commitUS: make([]int64, maxCommitLatencySamples),
 	}
 }
 
 func (m *EngineMetrics) ObserveCommitLatency(d time.Duration) {
 	m.mu.Lock()
-	m.commitUS = append(m.commitUS, d.Microseconds())
+	m.commitUS[m.next] = d.Microseconds()
+	m.next = (m.next + 1) % maxCommitLatencySamples
+	if m.count < maxCommitLatencySamples {
+		m.count++
+	}
 	m.mu.Unlock()
 }
 
@@ -74,9 +81,17 @@ func (m *EngineMetrics) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	p50 := percentile(m.commitUS, 0.50)
-	p95 := percentile(m.commitUS, 0.95)
-	p99 := percentile(m.commitUS, 0.99)
+	series := make([]int64, m.count)
+	if m.count == maxCommitLatencySamples {
+		copy(series, m.commitUS[m.next:])
+		copy(series[maxCommitLatencySamples-m.next:], m.commitUS[:m.next])
+	} else {
+		copy(series, m.commitUS[:m.next])
+	}
+
+	p50 := percentile(series, 0.50)
+	p95 := percentile(series, 0.95)
+	p99 := percentile(series, 0.99)
 
 	return Snapshot{
 		P50:        p50,

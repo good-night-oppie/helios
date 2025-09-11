@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package vst
 
 import (
@@ -34,9 +33,9 @@ import (
 var heliosDebug = os.Getenv("HELIOS_DEBUG") != ""
 
 func dprintf(format string, a ...any) {
-    if heliosDebug {
-        fmt.Fprintf(os.Stderr, "helios-debug: "+format+"\n", a...)
-    }
+	if heliosDebug {
+		fmt.Fprintf(os.Stderr, "helios-debug: "+format+"\n", a...)
+	}
 }
 
 // Ensure VST implements the StateManager interface at compile time.
@@ -82,6 +81,7 @@ func (v *VST) WriteFile(path string, content []byte) error {
 // DeleteFile removes a file from the current working set.
 func (v *VST) DeleteFile(path string) {
 	delete(v.cur, path)
+	delete(v.pathToHash, path)
 }
 
 // ReadFile reads a file from the current working set (copy returned).
@@ -287,21 +287,21 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 		for path, hash := range blobHashByPath {
 			snapshotData[path] = hash
 		}
-		
+
 		// Marshal snapshot metadata
 		metadataBytes, err := json.Marshal(snapshotData)
 		if err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to marshal snapshot metadata: %w", err)
 		}
-		
+
 		// Store snapshot metadata with special prefix
 		snapshotKey := string("snapshot:" + id)
 		dprintf("commit: storing snapshot metadata with key %s", snapshotKey)
 		snapshotMetadata := []objstore.BatchEntry{{
-			Hash: types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
+			Hash:  types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
 			Value: metadataBytes,
 		}}
-		
+
 		if err := v.l2.PutBatch(snapshotMetadata); err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to store snapshot metadata: %w", err)
 		}
@@ -340,13 +340,13 @@ func (v *VST) Restore(id types.SnapshotID) error {
 	if !ok && v.l2 == nil {
 		return fmt.Errorf("unknown snapshot: %s", id)
 	}
-	
+
 	// If snapshot is not in memory but L2 is available, try to restore from L2
 	if !ok {
 		// Try to get snapshot metadata from L2
 		if v.l2 != nil {
 			dprintf("restore: trying L2 restore for %s", id)
-			
+
 			// Get snapshot metadata
 			snapshotKey := string("snapshot:" + id)
 			dprintf("restore: trying to get metadata with key %s", snapshotKey)
@@ -358,14 +358,14 @@ func (v *VST) Restore(id types.SnapshotID) error {
 			if !ok {
 				return fmt.Errorf("unknown snapshot in L2: %s", id)
 			}
-			
+
 			// Unmarshal metadata
 			var snapshotData map[string]types.Hash
 			if err := json.Unmarshal(metadataBytes, &snapshotData); err != nil {
 				return fmt.Errorf("failed to unmarshal snapshot metadata: %w", err)
 			}
 			dprintf("restore: got snapshot metadata with %d files", len(snapshotData))
-			
+
 			// Reset working state and use snapshot metadata as path→hash mapping
 			v.cur = make(map[string][]byte)
 			v.pathToHash = snapshotData
@@ -379,7 +379,7 @@ func (v *VST) Restore(id types.SnapshotID) error {
 			cp := make([]byte, len(val))
 			copy(cp, val)
 			next[k] = cp
-			
+
 			// Always compute hash for in-memory snapshot files
 			h, err := util.HashBlob(val)
 			if err != nil {

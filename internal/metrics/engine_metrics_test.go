@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package metrics
 
 import (
@@ -92,6 +91,21 @@ func TestEngineMetrics_EdgeCases(t *testing.T) {
 	if snap.P50 != 42 || snap.P95 != 42 || snap.P99 != 42 {
 		t.Errorf("single value should give same percentiles, got P50=%d, P95=%d, P99=%d",
 			snap.P50, snap.P95, snap.P99)
+	}
+}
+
+func TestEngineMetrics_RetainLimit(t *testing.T) {
+	m := NewEngineMetrics()
+	for i := 0; i < maxCommitLatencySamples+100; i++ {
+		m.ObserveCommitLatency(time.Duration(i) * time.Microsecond)
+	}
+	if m.count != maxCommitLatencySamples {
+		t.Fatalf("expected count=%d, got %d", maxCommitLatencySamples, m.count)
+	}
+	snap := m.Snapshot()
+	// last 1024 samples are 100..1123, median index 511 -> value 611
+	if snap.P50 != 611 {
+		t.Fatalf("expected P50=611, got %d", snap.P50)
 	}
 }
 

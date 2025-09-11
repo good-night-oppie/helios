@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package vst
 
 import (
@@ -116,6 +115,8 @@ func TestMatchGlob_SpecialPatterns(t *testing.T) {
 		{"test.txt", "*.go", false},
 		{"prefix_file", "prefix**", true},
 		{"other_file", "prefix**", false},
+		{"src\\deep\\file.go", "src/**/file.go", true},
+		{"src\\other\\test.go", "src/**/file.go", false},
 	}
 
 	for _, tt := range tests {

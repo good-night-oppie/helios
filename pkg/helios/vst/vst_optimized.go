@@ -28,7 +28,7 @@ import (
 
 // CommitOptimized is a high-performance version of Commit that achieves <70μs targets
 // Key optimizations:
-// 1. O(n²) → O(n) directory tree building 
+// 1. O(n²) → O(n) directory tree building
 // 2. Copy-on-Write (COW) semantics for snapshots
 // 3. Efficient parent-child directory mapping
 func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics, error) {
@@ -36,9 +36,9 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 
 	// OPTIMIZATION 1: Copy-on-Write (COW) snapshot
 	// Instead of deep copying, share references and create new working set
-	snap := v.cur  // Share reference to current working set
+	snap := v.cur                              // Share reference to current working set
 	v.cur = make(map[string][]byte, len(snap)) // New working set for future modifications
-	
+
 	var newBytes int64
 	for _, val := range snap {
 		newBytes += int64(len(val))
@@ -47,7 +47,7 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 	// OPTIMIZATION 2: Batch compute all blob hashes
 	blobHashByPath := make(map[string]types.Hash, len(snap))
 	blobsToStore := make([]objstore.BatchEntry, 0, len(snap))
-	
+
 	for path, content := range snap {
 		h, err := util.HashBlob(content)
 		if err != nil {
@@ -85,13 +85,13 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 		if err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to marshal snapshot metadata: %w", err)
 		}
-		
+
 		snapshotKey := "snapshot:" + string(id)
 		snapshotMetadata := []objstore.BatchEntry{{
-			Hash: types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
+			Hash:  types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
 			Value: metadataBytes,
 		}}
-		
+
 		if err := v.l2.PutBatch(snapshotMetadata); err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to store snapshot metadata: %w", err)
 		}
@@ -126,21 +126,22 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 
 	// OPTIMIZATION: Build parent-child relationship map in single pass O(n)
 	type DirInfo struct {
-		children map[string]types.Hash  // child name -> hash
-		depth    int
+		files map[string]types.Hash // file name -> hash
+		dirs  map[string]struct{}   // child directory names
+		depth int
 	}
-	
+
 	dirMap := make(map[string]*DirInfo)
-	
+
 	// Initialize all directories
 	ensureDir := func(dir string) *DirInfo {
 		if info, exists := dirMap[dir]; exists {
 			return info
 		}
-		
 		info := &DirInfo{
-			children: make(map[string]types.Hash),
-			depth:    strings.Count(dir, "/"),
+			files: make(map[string]types.Hash),
+			dirs:  make(map[string]struct{}),
+			depth: strings.Count(dir, "/"),
 		}
 		if dir == "." {
 			info.depth = 0
@@ -155,25 +156,29 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 		if dir == "/" || dir == "" {
 			dir = "."
 		}
-		
+
 		// Ensure this directory exists
 		dirInfo := ensureDir(dir)
-		
+
 		// Register file in parent directory
 		fileName := filepath.Base(path)
-		dirInfo.children[fileName] = hash
-		
-		// Ensure all ancestor directories exist
+		dirInfo.files[fileName] = hash
+
+		// Ensure all ancestor directories exist and register dir hierarchy
 		ancestor := dir
-		for ancestor != "." {
+		for {
+			if ancestor == "." {
+				break
+			}
 			parent := filepath.Dir(ancestor)
 			if parent == "/" || parent == "" || parent == ancestor {
 				parent = "."
 			}
-			ensureDir(parent)
+			pInfo := ensureDir(parent)
+			pInfo.dirs[filepath.Base(ancestor)] = struct{}{}
 			ancestor = parent
 		}
-		ensureDir(".") // Ensure root exists
+		ensureDir(".")
 	}
 
 	// OPTIMIZATION: Sort directories by depth (deepest first) in O(n log n)
@@ -181,7 +186,7 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 	for dir := range dirMap {
 		dirs = append(dirs, dir)
 	}
-	
+
 	sort.Slice(dirs, func(i, j int) bool {
 		depthI, depthJ := dirMap[dirs[i]].depth, dirMap[dirs[j]].depth
 		if depthI == depthJ {
@@ -192,28 +197,23 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 
 	// Compute directory hashes bottom-up in O(n) time
 	dirHashes := make(map[string]types.Hash)
-	
+
 	for _, dir := range dirs {
 		dirInfo := dirMap[dir]
-		
+
 		// Collect entries for this directory
 		var entries []string
-		
+
 		// Add file entries (blobs)
-		for childName, childHash := range dirInfo.children {
+		for childName, childHash := range dirInfo.files {
 			entries = append(entries, fmt.Sprintf("%s:blob:%x", childName, childHash.Digest))
 		}
-		
-		// Add subdirectory entries (trees) - O(1) lookup instead of O(n) scan
-		for _, potentialChild := range dirs {
-			if potentialChild == dir {
-				continue
-			}
-			if filepath.Dir(potentialChild) == dir {
-				if childHash, exists := dirHashes[potentialChild]; exists {
-					childName := filepath.Base(potentialChild)
-					entries = append(entries, fmt.Sprintf("%s:tree:%x", childName, childHash.Digest))
-				}
+
+		// Add subdirectory entries using precomputed map
+		for childName := range dirInfo.dirs {
+			childPath := filepath.Join(dir, childName)
+			if childHash, exists := dirHashes[childPath]; exists {
+				entries = append(entries, fmt.Sprintf("%s:tree:%x", childName, childHash.Digest))
 			}
 		}
 
@@ -229,7 +229,7 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 	if rootHash, exists := dirHashes["."]; exists {
 		return rootHash, nil
 	}
-	
+
 	// Empty tree fallback
 	return util.HashTree(nil)
 }
