@@ -18,7 +18,7 @@ package util
 import (
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 func TestHashContent(t *testing.T) {

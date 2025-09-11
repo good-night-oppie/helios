@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+	"github.com/good-night-oppie/helios/cmd/helios-cli/internal/cli"
 )
 
 func TestNewConfig(t *testing.T) {

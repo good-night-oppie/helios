@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/good-night-oppie/helios-engine/internal/util"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/internal/util"
+	"github.com/good-night-oppie/helios/pkg/helios/objstore"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 // CommitOptimized is a high-performance version of Commit that achieves <70μs targets

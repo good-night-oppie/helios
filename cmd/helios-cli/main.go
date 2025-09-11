@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/good-night-oppie/helios-engine/cmd/helios-cli/internal/cli"
+	"github.com/good-night-oppie/helios/cmd/helios-cli/internal/cli"
 )
 
 // Version metadata. Overridden at build time via -ldflags.

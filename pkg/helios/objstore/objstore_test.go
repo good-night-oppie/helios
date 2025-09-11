@@ -21,9 +21,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/good-night-oppie/helios-engine/internal/util"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/objstore"
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/internal/util"
+	"github.com/good-night-oppie/helios/pkg/helios/objstore"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 func hOf(t *testing.T, b []byte) types.Hash {

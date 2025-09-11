@@ -18,7 +18,7 @@ package l1cache
 import (
 	"sync"
 
-	"github.com/good-night-oppie/helios-engine/pkg/helios/types"
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 	"github.com/klauspost/compress/zstd"
 )
 
