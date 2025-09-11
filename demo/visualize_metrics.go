@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build stress
 
 package main
 
@@ -33,26 +36,26 @@ type MetricsServer struct {
 func main() {
 	fmt.Println("🚀 Helios Demo Visualization Server")
 	fmt.Println("===================================")
-	
+
 	server := &MetricsServer{
 		metrics: stress.GenerateDemoMetrics(),
 	}
-	
+
 	// Serve static HTML dashboard
 	http.HandleFunc("/", server.serveDashboard)
-	
+
 	// Serve real-time metrics via JSON
 	http.HandleFunc("/metrics", server.serveMetrics)
-	
+
 	// WebSocket for live updates
 	http.HandleFunc("/ws", server.handleWebSocket)
-	
+
 	fmt.Println("📊 Dashboard: http://localhost:8080")
 	fmt.Println("📈 Metrics API: http://localhost:8080/metrics")
 	fmt.Println("")
 	fmt.Println("Starting demo in 3 seconds...")
 	time.Sleep(3 * time.Second)
-	
+
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 

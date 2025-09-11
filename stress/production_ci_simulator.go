@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build stress
 
 package stress
 
@@ -64,7 +67,7 @@ func TestProductionCIPipeline(t *testing.T) {
 		ParallelWorkflows: 50,
 		LazyRatio:         0.95, // 95% fail fast
 	}
-	
+
 	// Setup Helios with production configuration
 	l1, err := l1cache.New(l1cache.Config{
 		CapacityBytes:        1 << 30, // 1GB L1 cache
@@ -73,33 +76,33 @@ func TestProductionCIPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	l2Dir := t.TempDir()
 	l2, err := objstore.Open(l2Dir+"/rocks", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l2.Close()
-	
+
 	metrics := &ProductionMetrics{}
 	var mu sync.Mutex
 	latencies := make([]time.Duration, 0, 100000)
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	
+
 	start := time.Now()
 	var wg sync.WaitGroup
-	
+
 	// Simulate multiple repositories in parallel
 	for repo := 0; repo < workload.Repositories; repo++ {
 		wg.Add(1)
 		go func(repoID int) {
 			defer wg.Done()
-			
+
 			eng := vst.New()
 			eng.AttachStores(l1, l2)
-			
+
 			// Process commits
 			for commit := 0; commit < workload.CommitsPerMinute; commit++ {
 				select {
@@ -107,34 +110,34 @@ func TestProductionCIPipeline(t *testing.T) {
 					return
 				default:
 				}
-				
+
 				// Create base commit state
 				baseFiles := generateRepoFiles(repoID, commit)
 				for path, content := range baseFiles {
 					eng.WriteFile(path, content)
 				}
-				
+
 				baseSnapshot, _, err := eng.Commit(fmt.Sprintf("repo_%d_commit_%d", repoID, commit))
 				if err != nil {
 					t.Logf("Commit error: %v", err)
 					continue
 				}
-				
+
 				atomic.AddInt64(&metrics.SnapshotsCreated, 1)
-				
+
 				// Fan out parallel test workflows
 				var testWg sync.WaitGroup
 				for workflow := 0; workflow < workload.ParallelWorkflows; workflow++ {
 					testWg.Add(1)
 					go func(wfID int) {
 						defer testWg.Done()
-						
+
 						testStart := time.Now()
-						
+
 						// Branch from base (zero-copy operation)
 						eng.Restore(baseSnapshot)
 						atomic.AddInt64(&metrics.ContainersSpawned, 1)
-						
+
 						// Simulate test execution
 						for test := 0; test < workload.TestsPerCommit/workload.ParallelWorkflows; test++ {
 							if rand.Float64() < workload.LazyRatio {
@@ -147,10 +150,10 @@ func TestProductionCIPipeline(t *testing.T) {
 								simulateFullTest(eng)
 								atomic.AddInt64(&metrics.FullMaterializations, 1)
 							}
-							
+
 							atomic.AddInt64(&metrics.ExperimentsRun, 1)
 						}
-						
+
 						// Track latency
 						latency := time.Since(testStart)
 						mu.Lock()
@@ -162,16 +165,16 @@ func TestProductionCIPipeline(t *testing.T) {
 			}
 		}(repo)
 	}
-	
+
 	wg.Wait()
 	elapsed := time.Since(start)
-	
+
 	// Calculate final metrics
 	calculateProductionMetrics(metrics, latencies, elapsed)
-	
+
 	// Report results
 	reportProductionResults(t, metrics, workload, elapsed)
-	
+
 	// Verify SLA requirements
 	verifySLACompliance(t, metrics)
 }
@@ -179,64 +182,64 @@ func TestProductionCIPipeline(t *testing.T) {
 // TestChaosEngineering simulates Netflix-style chaos testing
 func TestChaosEngineering(t *testing.T) {
 	const (
-		Services          = 500
-		InstancesPerSvc   = 20
-		FailureScenarios  = 10000
-		ExperimentTime    = 60 * time.Second
+		Services         = 500
+		InstancesPerSvc  = 20
+		FailureScenarios = 10000
+		ExperimentTime   = 60 * time.Second
 	)
-	
+
 	// Create service mesh
 	l1, _ := l1cache.New(l1cache.Config{
 		CapacityBytes:        2 << 30, // 2GB for chaos testing
 		CompressionThreshold: 512,
 	})
-	
+
 	metrics := &ProductionMetrics{}
 	ctx, cancel := context.WithTimeout(context.Background(), ExperimentTime)
 	defer cancel()
-	
+
 	// Initialize service engines
 	engines := make([]*vst.VST, Services)
 	snapshots := make([]types.SnapshotID, Services)
-	
+
 	for i := 0; i < Services; i++ {
 		engines[i] = vst.New()
 		engines[i].AttachStores(l1, nil) // Memory-only for speed
-		
+
 		// Create initial service state
 		engines[i].WriteFile("config.yaml", generateServiceConfig(i))
 		engines[i].WriteFile("state.json", generateServiceState(i))
-		
+
 		id, _, _ := engines[i].Commit(fmt.Sprintf("service_%d_initial", i))
 		snapshots[i] = id
 		atomic.AddInt64(&metrics.SnapshotsCreated, 1)
 	}
-	
+
 	// Run chaos experiments
 	start := time.Now()
 	var experiments int64
-	
+
 	for experiment := 0; experiment < FailureScenarios; experiment++ {
 		select {
 		case <-ctx.Done():
 			break
 		default:
 		}
-		
+
 		// Snapshot all services (near-zero cost)
 		preFailureSnaps := make([]types.SnapshotID, Services)
 		for i, eng := range engines {
 			id, _, _ := eng.Commit(fmt.Sprintf("pre_chaos_%d", experiment))
 			preFailureSnaps[i] = id
 		}
-		
+
 		// Inject random failure
 		failureType := selectChaosPattern()
 		affectedServices := injectChaosFailure(engines, failureType)
-		
+
 		// Measure blast radius
 		impact := measureBlastRadius(engines, affectedServices)
-		
+
 		if impact > 0.1 { // Significant impact
 			// Materialize for analysis
 			atomic.AddInt64(&metrics.FullMaterializations, int64(len(affectedServices)))
@@ -249,14 +252,14 @@ func TestChaosEngineering(t *testing.T) {
 			atomic.AddInt64(&metrics.LazyMaterializations, int64(Services))
 			atomic.AddInt64(&metrics.IOOperationsSaved, int64(Services*10))
 		}
-		
+
 		atomic.AddInt64(&experiments, 1)
 	}
-	
+
 	elapsed := time.Since(start)
 	metrics.ThroughputPerSec = float64(experiments) / elapsed.Seconds()
 	metrics.ExperimentsRun = experiments
-	
+
 	t.Logf("=== Chaos Engineering Results ===")
 	t.Logf("Experiments: %d in %v", experiments, elapsed)
 	t.Logf("Throughput: %.0f experiments/sec", metrics.ThroughputPerSec)
@@ -267,49 +270,49 @@ func TestChaosEngineering(t *testing.T) {
 // TestServerlessExplorer simulates AWS Lambda-scale workloads
 func TestServerlessExplorer(t *testing.T) {
 	const (
-		Functions              = 10000
-		InvocationsPerSecond   = 100000
-		ColdStartRatio         = 0.1
-		MemoryConfigurations   = 5
-		TimeoutVariations      = 5
+		Functions            = 10000
+		InvocationsPerSecond = 100000
+		ColdStartRatio       = 0.1
+		MemoryConfigurations = 5
+		TimeoutVariations    = 5
 	)
-	
+
 	// Lambda-scale configuration
 	l1, _ := l1cache.New(l1cache.Config{
 		CapacityBytes:        4 << 30, // 4GB
 		CompressionThreshold: 256,
 	})
-	
+
 	metrics := &ProductionMetrics{}
-	
+
 	// Pre-warm function templates
 	functionTemplates := make(map[string]types.SnapshotID)
 	eng := vst.New()
 	eng.AttachStores(l1, nil)
-	
+
 	for mem := 0; mem < MemoryConfigurations; mem++ {
 		for timeout := 0; timeout < TimeoutVariations; timeout++ {
 			config := generateLambdaConfig(mem, timeout)
 			eng.WriteFile("function.json", config)
-			
+
 			id, _, _ := eng.Commit(fmt.Sprintf("lambda_template_%d_%d", mem, timeout))
 			key := fmt.Sprintf("%d_%d", mem, timeout)
 			functionTemplates[key] = id
 		}
 	}
-	
+
 	// Simulate invocations
 	start := time.Now()
 	var invocations int64
-	
+
 	for i := 0; i < InvocationsPerSecond; i++ {
 		funcID := rand.Intn(Functions)
-		
+
 		// Select random configuration
 		memConfig := rand.Intn(MemoryConfigurations)
 		timeoutConfig := rand.Intn(TimeoutVariations)
 		templateKey := fmt.Sprintf("%d_%d", memConfig, timeoutConfig)
-		
+
 		if rand.Float64() < ColdStartRatio {
 			// Cold start - branch from template
 			eng.Restore(functionTemplates[templateKey])
@@ -319,14 +322,14 @@ func TestServerlessExplorer(t *testing.T) {
 			// Warm reuse - near zero cost
 			atomic.AddInt64(&metrics.IOOperationsSaved, 5)
 		}
-		
+
 		// Execute function
 		executeLambdaFunction(eng, funcID)
 		atomic.AddInt64(&invocations, 1)
 	}
-	
+
 	elapsed := time.Since(start)
-	
+
 	t.Logf("=== Serverless Explorer Results ===")
 	t.Logf("Functions: %d", Functions)
 	t.Logf("Invocations: %d in %v", invocations, elapsed)
@@ -376,7 +379,7 @@ func generateServiceState(serviceID int) []byte {
 func selectChaosPattern() string {
 	patterns := []string{
 		"network_partition",
-		"service_crash", 
+		"service_crash",
 		"latency_injection",
 		"resource_exhaustion",
 		"data_corruption",
@@ -404,7 +407,7 @@ func measureBlastRadius(engines []*vst.VST, affected []int) float64 {
 func generateLambdaConfig(memoryTier, timeoutTier int) []byte {
 	memories := []int{128, 256, 512, 1024, 2048}
 	timeouts := []int{1, 5, 15, 30, 60}
-	
+
 	return []byte(fmt.Sprintf(`{
 		"memory": %d,
 		"timeout": %d,
@@ -430,18 +433,18 @@ func calculateProductionMetrics(metrics *ProductionMetrics, latencies []time.Dur
 		metrics.P50LatencyMs = float64(latencies[len(latencies)/2].Milliseconds())
 		metrics.P99LatencyMs = float64(latencies[len(latencies)*99/100].Milliseconds())
 	}
-	
+
 	metrics.ThroughputPerSec = float64(metrics.ExperimentsRun) / elapsed.Seconds()
-	
+
 	// Calculate cost savings
-	traditionalCost := float64(metrics.ExperimentsRun) * 0.001 // $0.001 per experiment
+	traditionalCost := float64(metrics.ExperimentsRun) * 0.001   // $0.001 per experiment
 	heliosCost := float64(metrics.FullMaterializations) * 0.0001 // Only pay for materialized
 	metrics.CostSavingsUSD = traditionalCost - heliosCost
 }
 
 func reportProductionResults(t *testing.T, metrics *ProductionMetrics, workload CIPipelineWorkload, elapsed time.Duration) {
 	t.Logf("=== Production CI/CD Pipeline Results ===")
-	t.Logf("Workload: %d repos, %d commits/min, %d tests/commit", 
+	t.Logf("Workload: %d repos, %d commits/min, %d tests/commit",
 		workload.Repositories, workload.CommitsPerMinute, workload.TestsPerCommit)
 	t.Logf("Duration: %v", elapsed)
 	t.Logf("")
@@ -453,8 +456,8 @@ func reportProductionResults(t *testing.T, metrics *ProductionMetrics, workload 
 	t.Logf("  P99 Latency: %.2fms", metrics.P99LatencyMs)
 	t.Logf("")
 	t.Logf("Efficiency Metrics:")
-	t.Logf("  Lazy Materializations: %d (%.1f%%)", 
-		metrics.LazyMaterializations, 
+	t.Logf("  Lazy Materializations: %d (%.1f%%)",
+		metrics.LazyMaterializations,
 		float64(metrics.LazyMaterializations)*100/float64(metrics.ExperimentsRun))
 	t.Logf("  Full Materializations: %d (%.1f%%)",
 		metrics.FullMaterializations,
@@ -468,11 +471,11 @@ func verifySLACompliance(t *testing.T, metrics *ProductionMetrics) {
 	if metrics.P99LatencyMs > 100 {
 		t.Errorf("P99 latency %.2fms exceeds SLA requirement of 100ms", metrics.P99LatencyMs)
 	}
-	
+
 	if metrics.ThroughputPerSec < 10000 {
 		t.Errorf("Throughput %.0f/sec below SLA requirement of 10,000/sec", metrics.ThroughputPerSec)
 	}
-	
+
 	ioReduction := float64(metrics.IOOperationsSaved) / float64(metrics.ExperimentsRun*10)
 	if ioReduction < 0.99 {
 		t.Errorf("IO reduction %.1f%% below SLA requirement of 99%%", ioReduction*100)
