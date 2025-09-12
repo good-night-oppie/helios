@@ -338,7 +338,7 @@ func (v *VST) Restore(id types.SnapshotID) error {
 	dprintf("starting restore of snapshot %s (in-memory snapshots=%+v)", id, v.snaps)
 	base, ok := v.snaps[id]
 	if !ok && v.l2 == nil {
-		return fmt.Errorf("unknown snapshot: %s", id)
+		return fmt.Errorf("snapshot %s not found in memory or L2 storage", id)
 	}
 
 	// If snapshot is not in memory but L2 is available, try to restore from L2
@@ -356,7 +356,7 @@ func (v *VST) Restore(id types.SnapshotID) error {
 				return err
 			}
 			if !ok {
-				return fmt.Errorf("unknown snapshot in L2: %s", id)
+				return fmt.Errorf("snapshot %s not found in L2 storage", id)
 			}
 
 			// Unmarshal metadata

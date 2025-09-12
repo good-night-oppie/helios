@@ -156,10 +156,20 @@ func (c *cache) Get(h types.Hash) ([]byte, bool) {
 	}
 	k := c.key(h)
 
+	success := false
+	defer func() {
+		c.mu.Lock()
+		if success {
+			c.stats.Hits++
+		} else {
+			c.stats.Misses++
+		}
+		c.mu.Unlock()
+	}()
+
 	c.mu.Lock()
 	ent, ok := c.entries[k]
 	if !ok {
-		c.stats.Misses++
 		c.mu.Unlock()
 		return nil, false
 	}
@@ -182,19 +192,14 @@ func (c *cache) Get(h types.Hash) ([]byte, bool) {
 				c.stats.Items--
 				c.stats.SizeBytes = uint64(c.sizeBytes)
 			}
-			c.stats.Misses++
 			c.mu.Unlock()
 			return nil, false
 		}
-		c.mu.Lock()
-		c.stats.Hits++
-		c.mu.Unlock()
+		success = true
 		return dec, true
 	}
 
-	c.mu.Lock()
-	c.stats.Hits++
-	c.mu.Unlock()
+	success = true
 	return data, true
 }
 

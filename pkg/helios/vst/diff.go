@@ -67,10 +67,10 @@ func (v *VST) snapshotHashes(id types.SnapshotID) (map[string]types.Hash, error)
 		metaHash := types.Hash{Algorithm: types.BLAKE3, Digest: []byte(key)}
 		data, ok, err := v.l2.Get(metaHash)
 		if err != nil {
-			return nil, fmt.Errorf("unknown snapshot: %s", id)
+			return nil, fmt.Errorf("get snapshot %s from L2: %w", id, err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("unknown snapshot: %s", id)
+			return nil, fmt.Errorf("snapshot %s not found in memory or L2 storage", id)
 		}
 		var m map[string]types.Hash
 		if err := json.Unmarshal(data, &m); err != nil {
@@ -78,7 +78,7 @@ func (v *VST) snapshotHashes(id types.SnapshotID) (map[string]types.Hash, error)
 		}
 		return m, nil
 	}
-	return nil, fmt.Errorf("unknown snapshot: %s", id)
+	return nil, fmt.Errorf("snapshot %s not found in memory or L2 storage", id)
 }
 
 func hashEqual(a, b types.Hash) bool {
