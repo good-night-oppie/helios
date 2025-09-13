@@ -43,7 +43,7 @@ func (v *VST) Materialize(id types.SnapshotID, outDir string, opts types.MatOpts
 			return types.CommitMetrics{}, err
 		}
 		if !ok {
-			return types.CommitMetrics{}, fmt.Errorf("unknown snapshot in L2: %s", id)
+			return types.CommitMetrics{}, fmt.Errorf("snapshot %s not found in L2 storage", id)
 		}
 
 		// Unmarshal metadata
@@ -65,7 +65,7 @@ func (v *VST) Materialize(id types.SnapshotID, outDir string, opts types.MatOpts
 			snap[path] = data
 		}
 	} else if !ok {
-		return types.CommitMetrics{}, fmt.Errorf("unknown snapshot: %s", id)
+		return types.CommitMetrics{}, fmt.Errorf("snapshot %s not found in memory or L2 storage", id)
 	}
 
 	var bytesTotal int64

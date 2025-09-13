@@ -211,7 +211,7 @@ func (v *VST) buildDirectoryTreeOptimized(blobHashByPath map[string]types.Hash) 
 
 		// Add subdirectory entries using precomputed map
 		for childName := range dirInfo.dirs {
-			childPath := filepath.Join(dir, childName)
+			childPath := filepath.Clean(filepath.Join(dir, childName))
 			if childHash, exists := dirHashes[childPath]; exists {
 				entries = append(entries, fmt.Sprintf("%s:tree:%x", childName, childHash.Digest))
 			}
