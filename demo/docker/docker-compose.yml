@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  helios-demo:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: helios-demo
+    ports:
+      - "3000:3000"  # Frontend
+      - "3001:3001"  # Backend API
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - helios-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.helios.description=Helios Parallel Universe Engine Demo"
+      - "com.helios.version=1.0.0"
+
+volumes:
+  helios-logs:
+    driver: local
