@@ -42,6 +42,7 @@ dist/
 build/
 out/
 target/
+bin/
 *.exe
 *.dll
 *.so

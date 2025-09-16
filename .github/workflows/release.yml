@@ -1,0 +1,168 @@
+name: Release Helios CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Get version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build multi-platform binaries
+      run: |
+        make build-all-platforms
+
+    - name: Create release directory
+      run: |
+        mkdir -p release
+        cp bin/* release/
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+        echo "# Helios CLI ${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "Fast Version Control for AI Agents" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "## Features" >> $GITHUB_OUTPUT
+        echo "- ⚡ Ultra-fast commit operations (<70μs)" >> $GITHUB_OUTPUT
+        echo "- 🔄 Versioned State Trees (VST)" >> $GITHUB_OUTPUT
+        echo "- 🔐 BLAKE3 content-addressable storage" >> $GITHUB_OUTPUT
+        echo "- 📊 Built-in performance metrics" >> $GITHUB_OUTPUT
+        echo "- 🐳 Docker containerization" >> $GITHUB_OUTPUT
+        echo "- 🔧 Multi-platform support" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "## Installation" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "### Download Binary" >> $GITHUB_OUTPUT
+        echo "Download the appropriate binary for your platform from the assets below." >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "### Install Script" >> $GITHUB_OUTPUT
+        echo "\`\`\`bash" >> $GITHUB_OUTPUT
+        echo "curl -fsSL https://releases.helios.dev/install.sh | sh" >> $GITHUB_OUTPUT
+        echo "\`\`\`" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "### Docker" >> $GITHUB_OUTPUT
+        echo "\`\`\`bash" >> $GITHUB_OUTPUT
+        echo "docker run --rm ghcr.io/good-night-oppie/helios:${{ steps.version.outputs.VERSION }} version" >> $GITHUB_OUTPUT
+        echo "\`\`\`" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.VERSION }}
+        name: Helios CLI ${{ steps.version.outputs.VERSION }}
+        body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
+        files: |
+          release/*
+        draft: false
+        prerelease: false
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      run: |
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
+          --build-arg VERSION=${{ steps.version.outputs.VERSION }} \
+          --build-arg COMMIT=${{ github.sha }} \
+          --build-arg DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+          .
+
+        docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+    - name: Configure AWS credentials
+      if: github.ref_type == 'tag'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        role-session-name: helios-release-${{ steps.version.outputs.VERSION }}
+        aws-region: us-east-1
+
+    - name: Upload to S3
+      if: github.ref_type == 'tag'
+      run: |
+        # Upload binaries to S3
+        aws s3 cp release/ s3://${{ secrets.S3_RELEASES_BUCKET }}/${{ steps.version.outputs.VERSION }}/ --recursive
+
+        # Create latest symlinks
+        for file in release/*; do
+          basename=$(basename "$file")
+          aws s3 cp "$file" s3://${{ secrets.S3_RELEASES_BUCKET }}/latest/"$basename"
+        done
+
+        # Upload install script
+        cat > install.sh << 'EOF'
+        #!/bin/bash
+        set -euo pipefail
+
+        VERSION="${HELIOS_VERSION:-${{ steps.version.outputs.VERSION }}}"
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+
+        case $ARCH in
+          x86_64) ARCH="amd64" ;;
+          arm64|aarch64) ARCH="arm64" ;;
+          *) echo "Unsupported architecture: $ARCH" && exit 1 ;;
+        esac
+
+        case $OS in
+          linux) BINARY="helios-linux-$ARCH" ;;
+          darwin) BINARY="helios-darwin-$ARCH" ;;
+          *) echo "Unsupported OS: $OS" && exit 1 ;;
+        esac
+
+        URL="https://releases.helios.dev/$VERSION/$BINARY"
+        echo "Downloading Helios CLI $VERSION for $OS/$ARCH..."
+
+        curl -fsSL "$URL" -o helios
+        chmod +x helios
+        sudo mv helios /usr/local/bin/
+
+        echo "Helios CLI $VERSION installed successfully!"
+        helios version
+        EOF
+
+        aws s3 cp install.sh s3://${{ secrets.S3_RELEASES_BUCKET }}/install.sh
+
+    - name: Invalidate CloudFront
+      if: github.ref_type == 'tag'
+      run: |
+        aws cloudfront create-invalidation \
+          --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+          --paths "/*"
