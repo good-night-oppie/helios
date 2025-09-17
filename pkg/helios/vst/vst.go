@@ -333,8 +333,19 @@ func depth(p string) int {
 	return strings.Count(filepath.Clean(p), string(os.PathSeparator))
 }
 
-// Restore replaces the current working set with the files from the given snapshot.
+// Restore replaces the current working set with the files from the given snapshot
+// and writes them to the filesystem. This is equivalent to calling RestoreWithOpts
+// with default options (WriteToFilesystem=true).
 func (v *VST) Restore(id types.SnapshotID) error {
+	// Call RestoreWithOpts with default options for backward compatibility
+	return v.RestoreWithOpts(id, types.RestoreOpts{WriteToFilesystem: true})
+}
+
+// RestoreWithOpts replaces the current working set with files from the given snapshot.
+// The behavior can be controlled via RestoreOpts:
+// - DryRun: when true, only restores to memory without filesystem writes
+// - WriteToFilesystem: when true (default), writes restored files to disk atomically
+func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error {
 	dprintf("starting restore of snapshot %s (in-memory snapshots=%+v)", id, v.snaps)
 	base, ok := v.snaps[id]
 	if !ok && v.l2 == nil {
@@ -407,26 +418,39 @@ func (v *VST) Restore(id types.SnapshotID) error {
 		restoredContent = next
 	}
 	
-	// Write restored content to filesystem
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
-	}
-	
-	for path, content := range restoredContent {
-		fullPath := filepath.Join(cwd, path)
-		
-		// Create directory if needed
-		dir := filepath.Dir(fullPath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	// Write restored content to filesystem if not in dry-run mode
+	if !opts.DryRun && opts.WriteToFilesystem {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get working directory: %w", err)
 		}
 		
-		// Write file
-		if err := os.WriteFile(fullPath, content, 0644); err != nil {
-			return fmt.Errorf("failed to write file %s: %w", path, err)
+		for path, content := range restoredContent {
+			fullPath := filepath.Join(cwd, path)
+			
+			// Create directory if needed
+			dir := filepath.Dir(fullPath)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", dir, err)
+			}
+			
+			// Write to a temporary file first for atomicity
+			tempFile := fullPath + ".tmp." + fmt.Sprintf("%d", time.Now().UnixNano())
+			if err := os.WriteFile(tempFile, content, 0644); err != nil {
+				return fmt.Errorf("failed to write temp file %s: %w", tempFile, err)
+			}
+			
+			// Atomically move temp file to final location
+			if err := os.Rename(tempFile, fullPath); err != nil {
+				// Clean up temp file if rename failed
+				os.Remove(tempFile)
+				return fmt.Errorf("failed to move file to final location %s: %w", path, err)
+			}
+			
+			dprintf("restored file %s (%d bytes)", path, len(content))
 		}
-		dprintf("restored file %s (%d bytes)", path, len(content))
+	} else if opts.DryRun || !opts.WriteToFilesystem {
+		dprintf("dry-run mode: skipped writing %d files to filesystem", len(restoredContent))
 	}
 	
 	return nil
