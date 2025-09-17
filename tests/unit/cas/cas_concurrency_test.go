@@ -152,10 +152,13 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
+		var wg sync.WaitGroup
 		
 		// Fill the write queue to trigger fallback paths
 		for i := 0; i < 1100; i++ { // More than buffer size (1000)
+			wg.Add(1)
 			go func(id int) {
+				defer wg.Done()
 				content := []byte(fmt.Sprintf("content-%d", id))
 				store.Store(content) // Should not panic even during shutdown
 			}(i)
@@ -164,6 +167,7 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		// Close immediately to test shutdown race conditions
 		err = store.Close()
 		require.NoError(t, err)
+		wg.Wait()
 		
 		// Additional operations after close should fail gracefully, not panic
 		_, err = store.Store([]byte("after close"))
