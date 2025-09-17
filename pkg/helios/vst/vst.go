@@ -352,6 +352,12 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 		return fmt.Errorf("unknown snapshot: %s", id)
 	}
 	
+	// Save the old tracked files before they get overwritten (for stale file cleanup)
+	oldTrackedFiles := make(map[string]bool)
+	for path := range v.cur {
+		oldTrackedFiles[path] = true
+	}
+	
 	// Prepare the content to restore
 	var restoredContent map[string][]byte
 	
@@ -425,6 +431,7 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 			return fmt.Errorf("failed to get working directory: %w", err)
 		}
 		
+		// Write all restored files
 		for path, content := range restoredContent {
 			fullPath := filepath.Join(cwd, path)
 			
@@ -447,7 +454,21 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 				return fmt.Errorf("failed to move file to final location %s: %w", path, err)
 			}
 			
+			// Mark this file as processed (no longer stale)
+			delete(oldTrackedFiles, path)
+			
 			dprintf("restored file %s (%d bytes)", path, len(content))
+		}
+		
+		// Clean up stale files that were tracked before but are not in the restored snapshot
+		for stalePath := range oldTrackedFiles {
+			fullPath := filepath.Join(cwd, stalePath)
+			if err := os.Remove(fullPath); err != nil {
+				// Log the error but don't fail the restore operation
+				dprintf("warning: failed to remove stale file %s: %v", stalePath, err)
+			} else {
+				dprintf("removed stale file %s", stalePath)
+			}
 		}
 	} else if opts.DryRun || !opts.WriteToFilesystem {
 		dprintf("dry-run mode: skipped writing %d files to filesystem", len(restoredContent))
