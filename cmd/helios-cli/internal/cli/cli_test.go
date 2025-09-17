@@ -54,6 +54,10 @@ func (f *FakeEngine) Restore(id types.SnapshotID) error {
 	return f.restoreError
 }
 
+func (f *FakeEngine) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error {
+	return f.restoreError
+}
+
 func (f *FakeEngine) Diff(from, to types.SnapshotID) (types.DiffStats, error) {
 	return f.diffResult, f.diffError
 }

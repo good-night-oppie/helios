@@ -36,9 +36,22 @@ type MatOpts struct {
 	Exclude []string
 }
 
+// RestoreOpts configures the behavior of the Restore operation.
+type RestoreOpts struct {
+	// DryRun when true, only restores to memory without writing to filesystem.
+	// Useful for testing and previewing restore operations.
+	DryRun bool
+	
+	// WriteToFilesystem controls whether files are written to disk.
+	// When false, files are only restored to memory (equivalent to DryRun=true).
+	// Default is true for backward compatibility.
+	WriteToFilesystem bool
+}
+
 type StateManager interface {
 	Commit(msg string) (SnapshotID, CommitMetrics, error)
 	Restore(id SnapshotID) error
+	RestoreWithOpts(id SnapshotID, opts RestoreOpts) error
 	Diff(from, to SnapshotID) (DiffStats, error)
 	Materialize(id SnapshotID, outDir string, opts MatOpts) (CommitMetrics, error)
 }

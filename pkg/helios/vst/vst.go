@@ -333,13 +333,33 @@ func depth(p string) int {
 	return strings.Count(filepath.Clean(p), string(os.PathSeparator))
 }
 
-// Restore replaces the current working set with the files from the given snapshot.
+// Restore replaces the current working set with the files from the given snapshot
+// and writes them to the filesystem. This is equivalent to calling RestoreWithOpts
+// with default options (WriteToFilesystem=true).
 func (v *VST) Restore(id types.SnapshotID) error {
+	// Call RestoreWithOpts with default options for backward compatibility
+	return v.RestoreWithOpts(id, types.RestoreOpts{WriteToFilesystem: true})
+}
+
+// RestoreWithOpts replaces the current working set with files from the given snapshot.
+// The behavior can be controlled via RestoreOpts:
+// - DryRun: when true, only restores to memory without filesystem writes
+// - WriteToFilesystem: when true (default), writes restored files to disk atomically
+func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error {
 	dprintf("starting restore of snapshot %s (in-memory snapshots=%+v)", id, v.snaps)
 	base, ok := v.snaps[id]
 	if !ok && v.l2 == nil {
 		return fmt.Errorf("unknown snapshot: %s", id)
 	}
+	
+	// Save the old tracked files before they get overwritten (for stale file cleanup)
+	oldTrackedFiles := make(map[string]bool)
+	for path := range v.cur {
+		oldTrackedFiles[path] = true
+	}
+	
+	// Prepare the content to restore
+	var restoredContent map[string][]byte
 	
 	// If snapshot is not in memory but L2 is available, try to restore from L2
 	if !ok {
@@ -366,13 +386,25 @@ func (v *VST) Restore(id types.SnapshotID) error {
 			}
 			dprintf("restore: got snapshot metadata with %d files", len(snapshotData))
 			
+			// Fetch file contents from L2
+			restoredContent = make(map[string][]byte)
+			for path, hash := range snapshotData {
+				data, ok, err := v.l2.Get(hash)
+				if err != nil {
+					return fmt.Errorf("failed to get file %s: %w", path, err)
+				}
+				if !ok {
+					return fmt.Errorf("missing file data for %s", path)
+				}
+				restoredContent[path] = data
+			}
+			
 			// Reset working state and use snapshot metadata as path→hash mapping
-			v.cur = make(map[string][]byte)
+			v.cur = restoredContent
 			v.pathToHash = snapshotData
 		}
-	}
-	// Copy in-memory snapshot to working set if not restoring from L2
-	if len(base) > 0 {
+	} else {
+		// Copy in-memory snapshot to working set
 		next := make(map[string][]byte, len(base))
 		pathHashes := make(map[string]types.Hash, len(base))
 		for k, val := range base {
@@ -389,7 +421,59 @@ func (v *VST) Restore(id types.SnapshotID) error {
 		}
 		v.cur = next
 		v.pathToHash = pathHashes
+		restoredContent = next
 	}
+	
+	// Write restored content to filesystem if not in dry-run mode
+	if !opts.DryRun && opts.WriteToFilesystem {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get working directory: %w", err)
+		}
+		
+		// Write all restored files
+		for path, content := range restoredContent {
+			fullPath := filepath.Join(cwd, path)
+			
+			// Create directory if needed
+			dir := filepath.Dir(fullPath)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", dir, err)
+			}
+			
+			// Write to a temporary file first for atomicity
+			tempFile := fullPath + ".tmp." + fmt.Sprintf("%d", time.Now().UnixNano())
+			if err := os.WriteFile(tempFile, content, 0644); err != nil {
+				return fmt.Errorf("failed to write temp file %s: %w", tempFile, err)
+			}
+			
+			// Atomically move temp file to final location
+			if err := os.Rename(tempFile, fullPath); err != nil {
+				// Clean up temp file if rename failed
+				os.Remove(tempFile)
+				return fmt.Errorf("failed to move file to final location %s: %w", path, err)
+			}
+			
+			// Mark this file as processed (no longer stale)
+			delete(oldTrackedFiles, path)
+			
+			dprintf("restored file %s (%d bytes)", path, len(content))
+		}
+		
+		// Clean up stale files that were tracked before but are not in the restored snapshot
+		for stalePath := range oldTrackedFiles {
+			fullPath := filepath.Join(cwd, stalePath)
+			if err := os.Remove(fullPath); err != nil {
+				// Log the error but don't fail the restore operation
+				dprintf("warning: failed to remove stale file %s: %v", stalePath, err)
+			} else {
+				dprintf("removed stale file %s", stalePath)
+			}
+		}
+	} else if opts.DryRun || !opts.WriteToFilesystem {
+		dprintf("dry-run mode: skipped writing %d files to filesystem", len(restoredContent))
+	}
+	
 	return nil
 }
 
