@@ -341,6 +341,9 @@ func (v *VST) Restore(id types.SnapshotID) error {
 		return fmt.Errorf("unknown snapshot: %s", id)
 	}
 	
+	// Prepare the content to restore
+	var restoredContent map[string][]byte
+	
 	// If snapshot is not in memory but L2 is available, try to restore from L2
 	if !ok {
 		// Try to get snapshot metadata from L2
@@ -366,13 +369,25 @@ func (v *VST) Restore(id types.SnapshotID) error {
 			}
 			dprintf("restore: got snapshot metadata with %d files", len(snapshotData))
 			
+			// Fetch file contents from L2
+			restoredContent = make(map[string][]byte)
+			for path, hash := range snapshotData {
+				data, ok, err := v.l2.Get(hash)
+				if err != nil {
+					return fmt.Errorf("failed to get file %s: %w", path, err)
+				}
+				if !ok {
+					return fmt.Errorf("missing file data for %s", path)
+				}
+				restoredContent[path] = data
+			}
+			
 			// Reset working state and use snapshot metadata as path→hash mapping
-			v.cur = make(map[string][]byte)
+			v.cur = restoredContent
 			v.pathToHash = snapshotData
 		}
-	}
-	// Copy in-memory snapshot to working set if not restoring from L2
-	if len(base) > 0 {
+	} else {
+		// Copy in-memory snapshot to working set
 		next := make(map[string][]byte, len(base))
 		pathHashes := make(map[string]types.Hash, len(base))
 		for k, val := range base {
@@ -389,7 +404,31 @@ func (v *VST) Restore(id types.SnapshotID) error {
 		}
 		v.cur = next
 		v.pathToHash = pathHashes
+		restoredContent = next
 	}
+	
+	// Write restored content to filesystem
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+	
+	for path, content := range restoredContent {
+		fullPath := filepath.Join(cwd, path)
+		
+		// Create directory if needed
+		dir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+		
+		// Write file
+		if err := os.WriteFile(fullPath, content, 0644); err != nil {
+			return fmt.Errorf("failed to write file %s: %w", path, err)
+		}
+		dprintf("restored file %s (%d bytes)", path, len(content))
+	}
+	
 	return nil
 }
 
