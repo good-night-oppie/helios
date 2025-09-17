@@ -155,6 +155,7 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		var wg sync.WaitGroup
 		
 		// Fill the write queue to trigger fallback paths
+		// Test rationale: 1100 goroutines > 1000 buffer size forces queue overflow conditions
 		for i := 0; i < 1100; i++ { // More than buffer size (1000)
 			wg.Add(1)
 			go func(id int) {
@@ -165,6 +166,8 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		}
 		
 		// Close immediately to test shutdown race conditions
+		// WaitGroup ensures all goroutines complete before TempDir cleanup
+		// Without this synchronization, test cleanup could fail intermittently
 		err = store.Close()
 		require.NoError(t, err)
 		wg.Wait()

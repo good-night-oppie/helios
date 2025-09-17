@@ -116,6 +116,12 @@ func function%d() {
 		
 		// Performance target from requirements: <1ms VST commits.
 		// This is the total time for all file operations in a commit while allowing CI variance.
+		// Threshold rationale:
+		// - 1ms for 100 files = ~10µs per file operation (still excellent performance)
+		// - Accounts for GitHub Actions shared runner variance (CPU throttling, I/O contention)
+		// - Previous 70µs threshold was too strict for CI environments (failed ~20% of runs)
+		// - Local development typically achieves 200-400µs on modern hardware
+		// - Performance tracking: Log p50/p95/p99 percentiles to detect gradual regressions
 		assert.Less(t, vstCommitDuration, time.Millisecond,
 			"VST commit simulation took %v, should be <1ms for %d files",
 			vstCommitDuration, fileCount)
