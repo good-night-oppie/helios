@@ -152,18 +152,25 @@ func TestRaceConditionAndShutdown(t *testing.T) {
 		tempDir := t.TempDir()
 		store, err := cas.NewBLAKE3Store(tempDir)
 		require.NoError(t, err)
+		var wg sync.WaitGroup
 		
 		// Fill the write queue to trigger fallback paths
+		// Test rationale: 1100 goroutines > 1000 buffer size forces queue overflow conditions
 		for i := 0; i < 1100; i++ { // More than buffer size (1000)
+			wg.Add(1)
 			go func(id int) {
+				defer wg.Done()
 				content := []byte(fmt.Sprintf("content-%d", id))
 				store.Store(content) // Should not panic even during shutdown
 			}(i)
 		}
 		
 		// Close immediately to test shutdown race conditions
+		// WaitGroup ensures all goroutines complete before TempDir cleanup
+		// Without this synchronization, test cleanup could fail intermittently
 		err = store.Close()
 		require.NoError(t, err)
+		wg.Wait()
 		
 		// Additional operations after close should fail gracefully, not panic
 		_, err = store.Store([]byte("after close"))
