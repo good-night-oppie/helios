@@ -305,30 +305,36 @@ func (s *BLAKE3Store) StoreBatch(contents [][]byte) ([]types.Hash, error) {
 		// Queue all writes together for better batching
 		for i, content := range contents {
 			filePath := filepath.Join(s.storePath, hashKeys[i])
-			
+
 			// Check if store is closed after acquiring lock
 			if atomic.LoadInt32(&s.closed) != 0 {
-				// Store is closed, write synchronously 
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				// Store is closed, write synchronously
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					return hashes, fmt.Errorf("failed to write batch entry %d (%s) during close: %w", i, filePath, err)
+				}
 				continue
 			}
-			
+
 			// Critical: Add to WaitGroup BEFORE attempting to send to channel
 			// We hold shutdownMu.RLock so Close() cannot proceed until we're done
 			s.wg.Add(1)
-			
+
 			select {
 			case <-s.done:
 				// Store is shutting down, decrement WaitGroup and fallback to sync write
 				s.wg.Done()
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode during shutdown
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					return hashes, fmt.Errorf("failed to write batch entry %d (%s) during shutdown: %w", i, filePath, err)
+				}
 			case s.writeQueue <- writeOp{filePath: filePath, content: content}:
 				// Successfully queued
 			default:
 				// Queue full, must call Done() since we already called Add()
 				s.wg.Done()
 				// Fallback to sync write
-				os.WriteFile(filePath, content, 0644) // Ignore error in batch mode
+				if err := os.WriteFile(filePath, content, 0644); err != nil {
+					return hashes, fmt.Errorf("failed to write batch entry %d (%s): %w", i, filePath, err)
+				}
 			}
 		}
 	}

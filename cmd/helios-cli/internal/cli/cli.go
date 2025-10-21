@@ -42,6 +42,7 @@ type Engine interface {
 	Materialize(id types.SnapshotID, outDir string, opts types.MatOpts) (types.CommitMetrics, error)
 	L1Stats() l1cache.CacheStats
 	EngineMetricsSnapshot() metrics.Snapshot
+	Close() error
 }
 
 // Config holds dependencies for CLI handlers
@@ -67,6 +68,7 @@ func HandleCommit(w io.Writer, cfg Config, workDir string) error {
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 
 	// Ingest current working directory into the engine before committing.
 	// This populates v.cur so that Commit() has real blobs to persist into L2.
@@ -133,6 +135,7 @@ func HandleRestore(w io.Writer, cfg Config, id string) error {
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 
 	if err := eng.Restore(types.SnapshotID(id)); err != nil {
 		return err
@@ -152,6 +155,7 @@ func HandleDiff(w io.Writer, cfg Config, from, to string) error {
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 
 	dr, err := eng.Diff(types.SnapshotID(from), types.SnapshotID(to))
 	if err != nil {
@@ -171,6 +175,7 @@ func HandleMaterialize(w io.Writer, cfg Config, id, outDir string, opts MatOpts)
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 
 	matOpts := types.MatOpts{
 		Include: opts.Include,
@@ -195,6 +200,7 @@ func HandleStats(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 
 	st := eng.L1Stats()
 	em := eng.EngineMetricsSnapshot()
@@ -223,7 +229,10 @@ func DefaultEngineFactory() (Engine, error) {
 	eng := vst.New()
 
 	// Attach a small L1 cache for observable stats
-	l1, _ := l1cache.New(l1cache.Config{CapacityBytes: 8 << 20, CompressionThreshold: 256})
+	l1, err := l1cache.New(l1cache.Config{CapacityBytes: 8 << 20, CompressionThreshold: 256})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create L1 cache: %w", err)
+	}
 
 	// Get store directory using the unified resolver
 	cwd, err := os.Getwd()

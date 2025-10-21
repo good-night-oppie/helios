@@ -28,8 +28,17 @@ import (
 // Materialize writes the files from a snapshot to a real directory on disk.
 func (v *VST) Materialize(id types.SnapshotID, outDir string, opts types.MatOpts) (types.CommitMetrics, error) {
 	start := time.Now()
+
+	// Validate and canonicalize output directory to prevent path traversal
+	absOutDir, err := filepath.Abs(outDir)
+	if err != nil {
+		return types.CommitMetrics{}, fmt.Errorf("failed to get absolute path for output directory: %w", err)
+	}
+
 	// First try to get snapshot from memory
+	v.mu.RLock()
 	snap, ok := v.snaps[id]
+	v.mu.RUnlock()
 
 	// If not in memory, try L2
 	if !ok && v.l2 != nil {
@@ -76,11 +85,27 @@ func (v *VST) Materialize(id types.SnapshotID, outDir string, opts types.MatOpts
 			continue
 		}
 
-		dst := filepath.Join(outDir, path)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		// Validate path to prevent directory traversal attacks
+		if err := validatePath(path); err != nil {
+			return types.CommitMetrics{}, fmt.Errorf("invalid path in snapshot %s: %w", path, err)
+		}
+
+		dst := filepath.Join(absOutDir, path)
+
+		// Double-check that the resolved destination is within outDir
+		// This prevents path traversal via symlinks or other tricks
+		absDst, err := filepath.Abs(dst)
+		if err != nil {
+			return types.CommitMetrics{}, fmt.Errorf("failed to resolve destination path: %w", err)
+		}
+		if !isSubpath(absOutDir, absDst) {
+			return types.CommitMetrics{}, fmt.Errorf("path traversal detected: %s would escape output directory", path)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil {
 			return types.CommitMetrics{}, err
 		}
-		if err := os.WriteFile(dst, content, 0o644); err != nil {
+		if err := os.WriteFile(absDst, content, 0o644); err != nil {
 			return types.CommitMetrics{}, err
 		}
 		bytesTotal += int64(len(content))
@@ -134,4 +159,37 @@ func matchGlob(path, pattern string) bool {
 	// Use filepath.Match for other patterns
 	matched, _ := filepath.Match(pattern, path)
 	return matched
+}
+
+// validatePath checks if a path is safe (doesn't contain path traversal attempts)
+func validatePath(path string) error {
+	// Reject absolute paths
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("absolute paths not allowed: %s", path)
+	}
+
+	// Clean the path to normalize it
+	cleaned := filepath.Clean(path)
+
+	// Check for path traversal attempts
+	if cleaned == ".." || filepath.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path traversal detected: %s", path)
+	}
+
+	return nil
+}
+
+// isSubpath checks if child is a subdirectory or file within parent
+func isSubpath(parent, child string) bool {
+	// Clean and make paths absolute for reliable comparison
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+
+	// Add trailing separator to parent to avoid false positives
+	// e.g., /foo should not match /foobar
+	if !filepath.HasSuffix(parent, string(filepath.Separator)) {
+		parent += string(filepath.Separator)
+	}
+
+	return filepath.HasPrefix(child+string(filepath.Separator), parent)
 }
