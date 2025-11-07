@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/good-night-oppie/helios/internal/metrics"
@@ -50,6 +51,7 @@ type VST struct {
 	l2         objstore.Store                         // L2 persistent store
 	pathToHash map[string]types.Hash                  // path -> content hash mapping for L1/L2 retrieval
 	em         *metrics.EngineMetrics                 // engine metrics collector
+	mu         sync.RWMutex                           // protects cur, pathToHash, and snaps
 }
 
 // New returns a fresh VST.
@@ -75,20 +77,28 @@ func (v *VST) AttachStores(l1 l1cache.Cache, l2 objstore.Store) {
 func (v *VST) WriteFile(path string, content []byte) error {
 	cp := make([]byte, len(content))
 	copy(cp, content)
+	v.mu.Lock()
 	v.cur[path] = cp
+	v.mu.Unlock()
 	return nil
 }
 
 // DeleteFile removes a file from the current working set.
 func (v *VST) DeleteFile(path string) {
+	v.mu.Lock()
 	delete(v.cur, path)
+	v.mu.Unlock()
 }
 
 // ReadFile reads a file from the current working set (copy returned).
 // If the file is not in memory but we have stores attached, it tries L1 then L2.
 func (v *VST) ReadFile(path string) ([]byte, error) {
 	// First check current working set
+	v.mu.RLock()
 	b, ok := v.cur[path]
+	hash, hasHash := v.pathToHash[path]
+	v.mu.RUnlock()
+
 	if ok {
 		cp := make([]byte, len(b))
 		copy(cp, b)
@@ -96,7 +106,6 @@ func (v *VST) ReadFile(path string) ([]byte, error) {
 	}
 
 	// Try to get from L1/L2 using stored hash
-	hash, hasHash := v.pathToHash[path]
 	if !hasHash {
 		return nil, nil // File doesn't exist
 	}
@@ -134,6 +143,7 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	start := time.Now()
 
 	// Deep copy current working set for the stored snapshot (restore/materialize rely on this).
+	v.mu.RLock()
 	snap := make(map[string][]byte, len(v.cur))
 	var newBytes int64
 	for k, val := range v.cur {
@@ -142,22 +152,21 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 		snap[k] = cp
 		newBytes += int64(len(cp))
 	}
+	v.mu.RUnlock()
 
 	// Compute Merkle root over the current working set.
 	// Algorithm:
 	//  1) For each file path -> hash blob(content)
 	//  2) Aggregate bottom-up by directory: "name:type:childHash"
 	//  3) The root (".") tree hash becomes SnapshotID
-	blobHashByPath := make(map[string]types.Hash, len(v.cur))
-	blobsToStore := make([]objstore.BatchEntry, 0, len(v.cur))
-	for path, content := range v.cur {
+	blobHashByPath := make(map[string]types.Hash, len(snap))
+	blobsToStore := make([]objstore.BatchEntry, 0, len(snap))
+	for path, content := range snap {
 		h, err := util.HashBlob(content)
 		if err != nil {
 			return "", types.CommitMetrics{}, err
 		}
 		blobHashByPath[path] = h
-		// Store path->hash mapping for L1/L2 retrieval
-		v.pathToHash[path] = h
 
 		// Prepare for L2 storage if attached
 		if v.l2 != nil {
@@ -167,6 +176,13 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 			})
 		}
 	}
+
+	// Store path->hash mapping for L1/L2 retrieval (must be done with lock)
+	v.mu.Lock()
+	for path, h := range blobHashByPath {
+		v.pathToHash[path] = h
+	}
+	v.mu.Unlock()
 
 	// Store blobs in L2 if attached
 	dprintf("commit: l2-attached=%v, blobsToStore=%d", v.l2 != nil, len(blobsToStore))
@@ -308,7 +324,9 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 	}
 
 	// Store the snapshot by content (keeps your existing restore/materialize/diff working)
+	v.mu.Lock()
 	v.snaps[id] = snap
+	v.mu.Unlock()
 
 	commitMetrics := types.CommitMetrics{
 		CommitLatency: time.Since(start),
@@ -346,16 +364,19 @@ func (v *VST) Restore(id types.SnapshotID) error {
 // - DryRun: when true, only restores to memory without filesystem writes
 // - WriteToFilesystem: when true (default), writes restored files to disk atomically
 func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error {
-	dprintf("starting restore of snapshot %s (in-memory snapshots=%+v)", id, v.snaps)
+	v.mu.RLock()
 	base, ok := v.snaps[id]
-	if !ok && v.l2 == nil {
-		return fmt.Errorf("unknown snapshot: %s", id)
-	}
-	
+	dprintf("starting restore of snapshot %s (in-memory snapshots=%d)", id, len(v.snaps))
+
 	// Save the old tracked files before they get overwritten (for stale file cleanup)
 	oldTrackedFiles := make(map[string]bool)
 	for path := range v.cur {
 		oldTrackedFiles[path] = true
+	}
+	v.mu.RUnlock()
+
+	if !ok && v.l2 == nil {
+		return fmt.Errorf("unknown snapshot: %s", id)
 	}
 	
 	// Prepare the content to restore
@@ -398,10 +419,12 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 				}
 				restoredContent[path] = data
 			}
-			
+
 			// Reset working state and use snapshot metadata as path→hash mapping
+			v.mu.Lock()
 			v.cur = restoredContent
 			v.pathToHash = snapshotData
+			v.mu.Unlock()
 		}
 	} else {
 		// Copy in-memory snapshot to working set
@@ -411,7 +434,7 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 			cp := make([]byte, len(val))
 			copy(cp, val)
 			next[k] = cp
-			
+
 			// Always compute hash for in-memory snapshot files
 			h, err := util.HashBlob(val)
 			if err != nil {
@@ -419,8 +442,10 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 			}
 			pathHashes[k] = h
 		}
+		v.mu.Lock()
 		v.cur = next
 		v.pathToHash = pathHashes
+		v.mu.Unlock()
 		restoredContent = next
 	}
 	
@@ -504,4 +529,12 @@ func (v *VST) EngineMetricsSnapshot() metrics.Snapshot {
 		return metrics.Snapshot{}
 	}
 	return v.em.Snapshot()
+}
+
+// Close releases resources, including closing the L2 store if attached.
+func (v *VST) Close() error {
+	if v.l2 != nil {
+		return v.l2.Close()
+	}
+	return nil
 }
