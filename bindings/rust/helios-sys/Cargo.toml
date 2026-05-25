@@ -1,0 +1,14 @@
+[package]
+name = "helios-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI declarations for Helios c-archive (cmd/heliosffi)"
+license = "Apache-2.0"
+publish = false
+links = "helios"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

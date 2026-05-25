@@ -1,0 +1,23 @@
+[workspace]
+members = ["helios-sys"]
+resolver = "2"
+
+[package]
+name = "helios-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust bindings for Helios VST + VFSFork primitives (ionq Vector A/B)"
+license = "Apache-2.0"
+repository = "https://github.com/good-night-oppie/helios"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "helios_smoke"
+path = "examples/helios_smoke.rs"
+
+[dependencies]
+helios-sys = { path = "helios-sys", version = "0.1.0" }
+thiserror = "1"

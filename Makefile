@@ -1,4 +1,4 @@
-.PHONY: all test cover lint clean build build-all-platforms release-check release-tag docker-build install dev-setup
+.PHONY: all test cover lint clean build build-all-platforms release-check release-tag docker-build install dev-setup ffi-archive ffi-smoke rust-build rust-test rust-smoke
 
 GO := /usr/local/go/bin/go
 PKGS_CORE := $(shell go list ./internal/... ./pkg/... ./cmd/helios-cli/internal/cli)
@@ -95,11 +95,37 @@ docker-push:
 	docker push ghcr.io/good-night-oppie/helios:$(VERSION)
 	docker push ghcr.io/good-night-oppie/helios:latest
 
+# FFI bridge — c-archive + curated header + C smoke test
+ffi-archive:
+	@echo "--- Building libhelios.a (c-archive) ---"
+	@mkdir -p bindings/c
+	CGO_ENABLED=1 $(GO) build -buildmode=c-archive -o bindings/c/libhelios.a ./cmd/heliosffi
+
+ffi-smoke: ffi-archive
+	@echo "--- Building + running C smoke test ---"
+	cc -O2 -o bindings/c/smoke bindings/c/smoke.c bindings/c/libhelios.a -lpthread -ldl
+	./bindings/c/smoke
+
+# Rust bindings (helios-sys raw + helios-rs safe wrapper)
+rust-build: ffi-archive
+	@echo "--- Building Rust bindings ---"
+	cd bindings/rust && cargo build --release
+
+rust-test: ffi-archive
+	@echo "--- Running Rust binding tests ---"
+	cd bindings/rust && cargo test --release
+
+rust-smoke: ffi-archive
+	@echo "--- Running Rust helios_smoke example ---"
+	cd bindings/rust && cargo run --release --example helios_smoke
+
 # Cleanup
 clean:
 	@echo "--- Cleaning up ---"
 	rm -f coverage.out
 	rm -rf $(BUILD_DIR)
+	rm -f bindings/c/libhelios.a bindings/c/libhelios.h bindings/c/smoke
+	rm -rf bindings/rust/target
 	docker rmi ghcr.io/good-night-oppie/helios:$(VERSION) 2>/dev/null || true
 	docker rmi ghcr.io/good-night-oppie/helios:latest 2>/dev/null || true
 
@@ -118,5 +144,10 @@ help:
 	@echo "  release-notes       - Generate release notes (set TAG=v1.0.0)"
 	@echo "  docker-build        - Build Docker image"
 	@echo "  docker-push         - Push Docker image"
+	@echo "  ffi-archive         - Build libhelios.a c-archive (CGO export)"
+	@echo "  ffi-smoke           - Build + run C smoke test against libhelios.a"
+	@echo "  rust-build          - Build Rust bindings (helios-sys + helios-rs)"
+	@echo "  rust-test           - Run Rust binding unit tests"
+	@echo "  rust-smoke          - Run cargo run --example helios_smoke"
 	@echo "  clean               - Clean up build artifacts"
 	@echo "  help                - Show this help message"
