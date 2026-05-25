@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/good-night-oppie/helios/pkg/helios/types"
@@ -187,9 +188,10 @@ func isSubpath(parent, child string) bool {
 
 	// Add trailing separator to parent to avoid false positives
 	// e.g., /foo should not match /foobar
-	if !filepath.HasSuffix(parent, string(filepath.Separator)) {
-		parent += string(filepath.Separator)
+	sep := string(filepath.Separator)
+	if !strings.HasSuffix(parent, sep) {
+		parent += sep
 	}
 
-	return filepath.HasPrefix(child+string(filepath.Separator), parent)
+	return strings.HasPrefix(child+sep, parent)
 }

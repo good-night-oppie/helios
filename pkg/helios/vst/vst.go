@@ -47,11 +47,12 @@ var _ types.StateManager = (*VST)(nil)
 type VST struct {
 	cur        map[string][]byte                      // current working set
 	snaps      map[types.SnapshotID]map[string][]byte // snapshot store
+	branches   map[BranchID]types.SnapshotID          // named branch heads (advanced by Fork.MergeInto)
 	l1         l1cache.Cache                          // L1 cache (hot data)
 	l2         objstore.Store                         // L2 persistent store
 	pathToHash map[string]types.Hash                  // path -> content hash mapping for L1/L2 retrieval
 	em         *metrics.EngineMetrics                 // engine metrics collector
-	mu         sync.RWMutex                           // protects cur, pathToHash, and snaps
+	mu         sync.RWMutex                           // protects cur, pathToHash, snaps, and branches
 }
 
 // New returns a fresh VST.
@@ -59,6 +60,7 @@ func New() *VST {
 	return &VST{
 		cur:        make(map[string][]byte),
 		snaps:      make(map[types.SnapshotID]map[string][]byte),
+		branches:   make(map[BranchID]types.SnapshotID),
 		pathToHash: make(map[string]types.Hash),
 		em:         metrics.NewEngineMetrics(),
 	}
