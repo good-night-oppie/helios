@@ -24,6 +24,12 @@ jobs:
       pull-requests: read
       issues: read
       id-token: write
+    env:
+      # Force Node 24 to bypass Node 20 fs consistency bug that trips
+      # anthropics/claude-code-action@v1's bundled tsconfig.json read:
+      #   "Internal error: directory mismatch for directory
+      #    /home/runner/work/_actions/anthropics/claude-code-action/v1/tsconfig.json, fd 4"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout repository
