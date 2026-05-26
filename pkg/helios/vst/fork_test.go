@@ -418,3 +418,130 @@ func hasPrefix(s, p string) bool {
 	}
 	return true
 }
+
+// TestFork_DiscardRaceTOCTOU stresses the TOCTOU window between an
+// out-of-lock state check and lock acquisition in Fork.Write / Read /
+// Delete / Diff / MergeInto. Before the fix, a concurrent Discard could
+// CAS state→discarded and nil the internal maps between a method's
+// ensureOpen() check and its f.mu lock, causing a nil-map write panic.
+//
+// Strategy: spawn many goroutines that hammer mutating ops while a single
+// goroutine races to Discard the fork. Run -race so any unsynchronised
+// map read/write would fire the race detector. The only acceptable per-op
+// outcomes are: success, or ErrForkDiscarded. No panics, no data races.
+//
+// Run with: go test -v -run TestFork_DiscardRaceTOCTOU -race -count=10 ./...
+func TestFork_DiscardRaceTOCTOU(t *testing.T) {
+	const iters = 1000
+
+	for i := 0; i < iters; i++ {
+		v, branch, _ := setupBase(t, map[string]string{"seed.txt": "seed"})
+		base := v.mustHead(t, branch)
+		f, err := v.Fork(base)
+		if err != nil {
+			t.Fatalf("iter %d: Fork: %v", i, err)
+		}
+
+		const writers = 4
+		var wg sync.WaitGroup
+		wg.Add(writers + 1)
+
+		// Writers hammer all the mutating + read paths concurrently.
+		for w := 0; w < writers; w++ {
+			go func(wid int) {
+				defer wg.Done()
+				path := fmt.Sprintf("w%d.txt", wid)
+				payload := []byte(fmt.Sprintf("payload-%d", wid))
+				for j := 0; j < 32; j++ {
+					if err := f.Write(path, payload); err != nil && !errors.Is(err, ErrForkDiscarded) {
+						t.Errorf("iter %d writer %d Write: unexpected err %v", i, wid, err)
+						return
+					}
+					if _, err := f.Read(path); err != nil && !errors.Is(err, ErrForkDiscarded) {
+						t.Errorf("iter %d writer %d Read: unexpected err %v", i, wid, err)
+						return
+					}
+					if err := f.Delete(path); err != nil && !errors.Is(err, ErrForkDiscarded) {
+						t.Errorf("iter %d writer %d Delete: unexpected err %v", i, wid, err)
+						return
+					}
+					// Diff returns nil on discarded fork (not an error path) so
+					// just exercising it is enough to catch nil-map panics.
+					_ = f.Diff()
+				}
+			}(w)
+		}
+
+		// Single discarder racing the writers.
+		go func() {
+			defer wg.Done()
+			// Slight stagger so the first iterations of each writer have a
+			// chance to interleave with the state CAS.
+			runtime.Gosched()
+			f.Discard()
+		}()
+
+		wg.Wait()
+
+		// After Discard, every op must terminate cleanly.
+		if err := f.Write("post.txt", []byte("x")); !errors.Is(err, ErrForkDiscarded) {
+			t.Fatalf("iter %d: post-discard Write err = %v; want ErrForkDiscarded", i, err)
+		}
+		if _, err := f.Read("post.txt"); !errors.Is(err, ErrForkDiscarded) {
+			t.Fatalf("iter %d: post-discard Read err = %v; want ErrForkDiscarded", i, err)
+		}
+	}
+}
+
+// TestFork_MergeIntoVsDiscardRace exercises the analogous TOCTOU between
+// MergeInto's phase-1 read snapshot and a concurrent Discard. Acceptable
+// outcomes: (a) merge wins, branch advances; (b) discard wins, MergeInto
+// returns ErrForkDiscarded with no branch advance. No panics, no races.
+func TestFork_MergeIntoVsDiscardRace(t *testing.T) {
+	const iters = 200
+
+	for i := 0; i < iters; i++ {
+		v, branch, _ := setupBase(t, map[string]string{"seed.txt": "seed"})
+		base := v.mustHead(t, branch)
+		f, err := v.Fork(base)
+		if err != nil {
+			t.Fatalf("iter %d: Fork: %v", i, err)
+		}
+		// Plant a few overlay writes so MergeInto has real phase-1 work.
+		for k := 0; k < 4; k++ {
+			path := fmt.Sprintf("k%d.txt", k)
+			if err := f.Write(path, []byte("v")); err != nil {
+				t.Fatalf("iter %d: Write: %v", i, err)
+			}
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var mergeErr error
+		go func() {
+			defer wg.Done()
+			_, mergeErr = f.MergeInto(branch)
+		}()
+		go func() {
+			defer wg.Done()
+			runtime.Gosched()
+			f.Discard()
+		}()
+		wg.Wait()
+
+		head, _ := v.BranchHead(branch)
+		switch {
+		case mergeErr == nil:
+			if head == base {
+				t.Fatalf("iter %d: merge ok but head did not advance", i)
+			}
+		case errors.Is(mergeErr, ErrForkDiscarded):
+			// Acceptable: Discard CAS'd state before phase-1 ensureOpen check.
+			if head != base {
+				t.Fatalf("iter %d: discard-wins case but branch advanced (head=%s)", i, head)
+			}
+		default:
+			t.Fatalf("iter %d: unexpected MergeInto err: %v", i, mergeErr)
+		}
+	}
+}

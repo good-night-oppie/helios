@@ -163,10 +163,14 @@ func (f *Fork) ensureOpen() error {
 
 // Write installs content at path in the fork overlay.
 // Content is hashed (BLAKE3) and held in fork-local RAM; no RocksDB I/O.
+//
+// The hash compute is done outside the lock (pure CPU, no shared state) but
+// the ensureOpen() state check happens inside the lock to close the TOCTOU
+// race with a concurrent Discard: if Discard wins the state CAS after our
+// check but before our Lock, Discard would nil the overlay/content maps
+// underneath us. With the check held under the same lock Discard later
+// acquires, that ordering can no longer produce a nil-map panic.
 func (f *Fork) Write(path string, content []byte) error {
-	if err := f.ensureOpen(); err != nil {
-		return err
-	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	h, err := util.HashBlob(cp)
@@ -174,52 +178,57 @@ func (f *Fork) Write(path string, content []byte) error {
 		return err
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.ensureOpen(); err != nil {
+		return err
+	}
 	f.overlay[path] = h
 	delete(f.tombstones, path)
 	f.content[string(h.Digest)] = cp
-	f.mu.Unlock()
 	return nil
 }
 
 // Delete tombstones a path in the fork. Read will return nil for that path
 // even if it exists in base. The tombstone is honoured at MergeInto time.
+// ensureOpen() is held inside the lock; see Write for the TOCTOU rationale.
 func (f *Fork) Delete(path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.ensureOpen(); err != nil {
 		return err
 	}
-	f.mu.Lock()
 	delete(f.overlay, path)
 	f.tombstones[path] = struct{}{}
-	f.mu.Unlock()
 	return nil
 }
 
 // Read returns the content of path as visible through the fork:
 // overlay → tombstone (nil) → base. Returns (nil, nil) if path is absent.
 // The returned slice is a copy and may be modified by the caller.
+//
+// The RLock excludes Discard's write Lock, so a concurrent Discard cannot
+// nil the maps mid-read. ensureOpen() is checked inside the RLock to close
+// the TOCTOU window between an outside-the-lock check and lock acquisition.
 func (f *Fork) Read(path string) ([]byte, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	if err := f.ensureOpen(); err != nil {
 		return nil, err
 	}
-	f.mu.RLock()
 	if _, deleted := f.tombstones[path]; deleted {
-		f.mu.RUnlock()
 		return nil, nil
 	}
 	if h, ok := f.overlay[path]; ok {
 		if c, ok2 := f.content[string(h.Digest)]; ok2 {
 			cp := make([]byte, len(c))
 			copy(cp, c)
-			f.mu.RUnlock()
 			return cp, nil
 		}
 	}
-	base := f.baseSnap
-	f.mu.RUnlock()
-	if base == nil {
+	if f.baseSnap == nil {
 		return nil, nil
 	}
-	if v, ok := base[path]; ok {
+	if v, ok := f.baseSnap[path]; ok {
 		cp := make([]byte, len(v))
 		copy(cp, v)
 		return cp, nil
@@ -229,12 +238,13 @@ func (f *Fork) Read(path string) ([]byte, error) {
 
 // Diff returns the set of path-level changes between the fork and its base,
 // sorted by path for deterministic output. Safe to call concurrently.
+// ensureOpen() is checked inside the RLock; see Read for the rationale.
 func (f *Fork) Diff() []Change {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	if err := f.ensureOpen(); err != nil {
 		return nil
 	}
-	f.mu.RLock()
-	defer f.mu.RUnlock()
 
 	changes := make([]Change, 0, len(f.overlay)+len(f.tombstones))
 	for path, h := range f.overlay {
@@ -299,13 +309,16 @@ func (f *Fork) Discard() {
 // On success the new snapshot is materialised into VST (and L2 if attached),
 // the branch head is advanced, and the fork is transitioned to merged state.
 func (f *Fork) MergeInto(branch BranchID) (types.SnapshotID, error) {
-	if err := f.ensureOpen(); err != nil {
-		return "", err
-	}
 	v := f.vst
 
 	// --- Phase 1: snapshot fork state under read lock (no VST lock yet) ---
+	// ensureOpen() is checked inside the RLock so a concurrent Discard cannot
+	// nil baseSnap/overlay/content/tombstones between the check and the read.
 	f.mu.RLock()
+	if err := f.ensureOpen(); err != nil {
+		f.mu.RUnlock()
+		return "", err
+	}
 	composed := make(map[string][]byte, len(f.baseSnap)+len(f.overlay))
 	for k, val := range f.baseSnap {
 		composed[k] = val // share immutable base bytes; we deep-copy at store time
