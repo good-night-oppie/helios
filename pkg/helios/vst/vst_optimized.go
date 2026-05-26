@@ -27,18 +27,27 @@ import (
 )
 
 // CommitOptimized is a high-performance version of Commit that achieves <70μs targets
+// for the default agent's working set.
+// Equivalent to CommitOptimizedForAgent(AgentDefault, msg).
 // Key optimizations:
-// 1. O(n²) → O(n) directory tree building 
+// 1. O(n²) → O(n) directory tree building
 // 2. Copy-on-Write (COW) semantics for snapshots
 // 3. Efficient parent-child directory mapping
 func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	return v.CommitOptimizedForAgent(AgentDefault, msg)
+}
+
+// CommitOptimizedForAgent is the agent-aware variant of CommitOptimized.
+func (v *VST) CommitOptimizedForAgent(agent AgentId, msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	_ = msg // commit message currently unused (parity with Commit)
 	start := time.Now()
 
 	// OPTIMIZATION 1: Copy-on-Write (COW) snapshot
 	// Instead of deep copying, share references and create new working set
-	snap := v.cur  // Share reference to current working set
-	v.cur = make(map[string][]byte, len(snap)) // New working set for future modifications
-	
+	s := v.agentRW(agent)
+	snap := s.cur                                  // Share reference to current working set
+	s.cur = make(map[string][]byte, len(snap))     // New working set for future modifications
+
 	var newBytes int64
 	for _, val := range snap {
 		newBytes += int64(len(val))
@@ -47,14 +56,14 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 	// OPTIMIZATION 2: Batch compute all blob hashes
 	blobHashByPath := make(map[string]types.Hash, len(snap))
 	blobsToStore := make([]objstore.BatchEntry, 0, len(snap))
-	
+
 	for path, content := range snap {
 		h, err := util.HashBlob(content)
 		if err != nil {
 			return "", types.CommitMetrics{}, err
 		}
 		blobHashByPath[path] = h
-		v.pathToHash[path] = h
+		s.pathToHash[path] = h
 
 		if v.l2 != nil {
 			blobsToStore = append(blobsToStore, objstore.BatchEntry{

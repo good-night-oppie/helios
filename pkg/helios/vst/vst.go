@@ -44,26 +44,30 @@ func dprintf(format string, a ...any) {
 var _ types.StateManager = (*VST)(nil)
 
 // VST is an in-memory Virtual State Tree used for fast user-space snapshots.
+//
+// Multi-tenancy: per-tenant working state lives in `agents`, keyed by AgentId.
+// The legacy single-tenant API resolves to AgentDefault. Snapshots remain
+// content-addressed and shared across agents via the global `snaps` table so
+// that identical content from any agent yields the same SnapshotID.
 type VST struct {
-	cur        map[string][]byte                      // current working set
-	snaps      map[types.SnapshotID]map[string][]byte // snapshot store
-	branches   map[BranchID]types.SnapshotID          // named branch heads (advanced by Fork.MergeInto)
-	l1         l1cache.Cache                          // L1 cache (hot data)
-	l2         objstore.Store                         // L2 persistent store
-	pathToHash map[string]types.Hash                  // path -> content hash mapping for L1/L2 retrieval
-	em         *metrics.EngineMetrics                 // engine metrics collector
-	mu         sync.RWMutex                           // protects cur, pathToHash, snaps, and branches
+	agents map[AgentId]*agentState                // per-agent cur / pathToHash / branches
+	snaps  map[types.SnapshotID]map[string][]byte // snapshot store — global, content-addressed
+	l1     l1cache.Cache                          // L1 cache (hot data)
+	l2     objstore.Store                         // L2 persistent store
+	em     *metrics.EngineMetrics                 // engine metrics collector
+	mu     sync.RWMutex                           // protects agents (and each agentState), snaps
 }
 
-// New returns a fresh VST.
+// New returns a fresh VST with the default agent pre-created so the legacy
+// single-tenant API is immediately usable without an extra allocation.
 func New() *VST {
-	return &VST{
-		cur:        make(map[string][]byte),
-		snaps:      make(map[types.SnapshotID]map[string][]byte),
-		branches:   make(map[BranchID]types.SnapshotID),
-		pathToHash: make(map[string]types.Hash),
-		em:         metrics.NewEngineMetrics(),
+	v := &VST{
+		agents: make(map[AgentId]*agentState),
+		snaps:  make(map[types.SnapshotID]map[string][]byte),
+		em:     metrics.NewEngineMetrics(),
 	}
+	v.agents[AgentDefault] = newAgentState()
+	return v
 }
 
 // AttachStores attaches L1 cache and L2 object store to the VST.
@@ -75,30 +79,63 @@ func (v *VST) AttachStores(l1 l1cache.Cache, l2 objstore.Store) {
 	}
 }
 
-// WriteFile writes/overwrites a file in the current working set (in memory).
+// WriteFile writes/overwrites a file in the default agent's working set.
+// Equivalent to WriteFileForAgent(AgentDefault, path, content).
 func (v *VST) WriteFile(path string, content []byte) error {
+	return v.WriteFileForAgent(AgentDefault, path, content)
+}
+
+// WriteFileForAgent writes/overwrites a file in the named agent's working
+// set (in memory only). The agent's per-tenant state is lazily created on
+// first write.
+func (v *VST) WriteFileForAgent(agent AgentId, path string, content []byte) error {
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	v.mu.Lock()
-	v.cur[path] = cp
+	v.agentRW(agent).cur[path] = cp
 	v.mu.Unlock()
 	return nil
 }
 
-// DeleteFile removes a file from the current working set.
+// DeleteFile removes a file from the default agent's working set.
+// Equivalent to DeleteFileForAgent(AgentDefault, path).
 func (v *VST) DeleteFile(path string) {
+	v.DeleteFileForAgent(AgentDefault, path)
+}
+
+// DeleteFileForAgent removes a file from the named agent's working set.
+// No-op for unknown agents (no state to delete from).
+func (v *VST) DeleteFileForAgent(agent AgentId, path string) {
 	v.mu.Lock()
-	delete(v.cur, path)
+	if s, ok := v.agentRO(agent); ok {
+		delete(s.cur, path)
+	}
 	v.mu.Unlock()
 }
 
-// ReadFile reads a file from the current working set (copy returned).
-// If the file is not in memory but we have stores attached, it tries L1 then L2.
+// ReadFile reads a file from the default agent's working set (copy returned).
+// Equivalent to ReadFileForAgent(AgentDefault, path).
+// If the file is not in memory but L1/L2 stores are attached, it tries L1 then L2.
 func (v *VST) ReadFile(path string) ([]byte, error) {
+	return v.ReadFileForAgent(AgentDefault, path)
+}
+
+// ReadFileForAgent reads a file from the named agent's working set.
+// If the file is not in memory but L1/L2 stores are attached, it tries
+// L1 then L2 via the agent's path-to-hash map.
+func (v *VST) ReadFileForAgent(agent AgentId, path string) ([]byte, error) {
 	// First check current working set
 	v.mu.RLock()
-	b, ok := v.cur[path]
-	hash, hasHash := v.pathToHash[path]
+	var (
+		b       []byte
+		ok      bool
+		hash    types.Hash
+		hasHash bool
+	)
+	if s, agentOk := v.agentRO(agent); agentOk {
+		b, ok = s.cur[path]
+		hash, hasHash = s.pathToHash[path]
+	}
 	v.mu.RUnlock()
 
 	if ok {
@@ -140,19 +177,38 @@ func (v *VST) ReadFile(path string) ([]byte, error) {
 	return nil, nil // Not found anywhere
 }
 
-// Commit creates a snapshot and returns a content-addressed SnapshotID (Merkle root).
+// Commit creates a snapshot of the default agent's working set and returns
+// a content-addressed SnapshotID (Merkle root). Equivalent to
+// CommitForAgent(AgentDefault, msg).
 func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	return v.CommitForAgent(AgentDefault, msg)
+}
+
+// CommitForAgent creates a snapshot of the named agent's working set.
+// The returned SnapshotID is content-addressed: identical content from
+// any agent yields the same SnapshotID and shares storage in v.snaps.
+func (v *VST) CommitForAgent(agent AgentId, msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	_ = msg // commit message currently unused (parity with Commit)
 	start := time.Now()
 
 	// Deep copy current working set for the stored snapshot (restore/materialize rely on this).
 	v.mu.RLock()
-	snap := make(map[string][]byte, len(v.cur))
-	var newBytes int64
-	for k, val := range v.cur {
-		cp := make([]byte, len(val))
-		copy(cp, val)
-		snap[k] = cp
-		newBytes += int64(len(cp))
+	var (
+		snap     map[string][]byte
+		newBytes int64
+	)
+	if s, ok := v.agentRO(agent); ok {
+		snap = make(map[string][]byte, len(s.cur))
+		for k, val := range s.cur {
+			cp := make([]byte, len(val))
+			copy(cp, val)
+			snap[k] = cp
+			newBytes += int64(len(cp))
+		}
+	} else {
+		// Unknown agent: commit an empty working set (matches single-tenant
+		// behaviour where a fresh VST commits to the empty-tree snapshot).
+		snap = map[string][]byte{}
 	}
 	v.mu.RUnlock()
 
@@ -181,8 +237,11 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 
 	// Store path->hash mapping for L1/L2 retrieval (must be done with lock)
 	v.mu.Lock()
-	for path, h := range blobHashByPath {
-		v.pathToHash[path] = h
+	{
+		s := v.agentRW(agent)
+		for path, h := range blobHashByPath {
+			s.pathToHash[path] = h
+		}
 	}
 	v.mu.Unlock()
 
@@ -353,27 +412,34 @@ func depth(p string) int {
 	return strings.Count(filepath.Clean(p), string(os.PathSeparator))
 }
 
-// Restore replaces the current working set with the files from the given snapshot
-// and writes them to the filesystem. This is equivalent to calling RestoreWithOpts
-// with default options (WriteToFilesystem=true).
+// Restore replaces the default agent's working set with the files from the given
+// snapshot and writes them to the filesystem. Equivalent to RestoreWithOpts with
+// WriteToFilesystem=true.
 func (v *VST) Restore(id types.SnapshotID) error {
-	// Call RestoreWithOpts with default options for backward compatibility
 	return v.RestoreWithOpts(id, types.RestoreOpts{WriteToFilesystem: true})
 }
 
-// RestoreWithOpts replaces the current working set with files from the given snapshot.
-// The behavior can be controlled via RestoreOpts:
-// - DryRun: when true, only restores to memory without filesystem writes
-// - WriteToFilesystem: when true (default), writes restored files to disk atomically
+// RestoreWithOpts replaces the default agent's working set with the snapshot's
+// contents. Equivalent to RestoreForAgent(AgentDefault, id, opts).
 func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error {
+	return v.RestoreForAgent(AgentDefault, id, opts)
+}
+
+// RestoreForAgent replaces the named agent's working set with the snapshot's
+// contents. Behaviour mirrors RestoreWithOpts.
+// - DryRun: when true, only restores to memory without filesystem writes
+// - WriteToFilesystem: when true, writes restored files to disk atomically
+func (v *VST) RestoreForAgent(agent AgentId, id types.SnapshotID, opts types.RestoreOpts) error {
 	v.mu.RLock()
 	base, ok := v.snaps[id]
 	dprintf("starting restore of snapshot %s (in-memory snapshots=%d)", id, len(v.snaps))
 
 	// Save the old tracked files before they get overwritten (for stale file cleanup)
 	oldTrackedFiles := make(map[string]bool)
-	for path := range v.cur {
-		oldTrackedFiles[path] = true
+	if s, agentOk := v.agentRO(agent); agentOk {
+		for path := range s.cur {
+			oldTrackedFiles[path] = true
+		}
 	}
 	v.mu.RUnlock()
 
@@ -422,10 +488,11 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 				restoredContent[path] = data
 			}
 
-			// Reset working state and use snapshot metadata as path→hash mapping
+			// Reset agent working state and use snapshot metadata as path→hash mapping
 			v.mu.Lock()
-			v.cur = restoredContent
-			v.pathToHash = snapshotData
+			s := v.agentRW(agent)
+			s.cur = restoredContent
+			s.pathToHash = snapshotData
 			v.mu.Unlock()
 		}
 	} else {
@@ -445,8 +512,9 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 			pathHashes[k] = h
 		}
 		v.mu.Lock()
-		v.cur = next
-		v.pathToHash = pathHashes
+		s := v.agentRW(agent)
+		s.cur = next
+		s.pathToHash = pathHashes
 		v.mu.Unlock()
 		restoredContent = next
 	}

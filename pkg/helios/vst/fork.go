@@ -98,7 +98,10 @@ const (
 )
 
 // Fork is a goroutine-safe copy-on-write overlay on top of a base snapshot.
+// Each fork carries the AgentId under which it was opened; MergeInto advances
+// branches only within that agent's namespace.
 type Fork struct {
+	agent      AgentId
 	base       types.SnapshotID
 	baseSnap   map[string][]byte // shared read-only ref into v.snaps[base]
 	overlay    map[string]types.Hash
@@ -113,13 +116,22 @@ type Fork struct {
 // nextForkGen is the monotonically increasing source for Fork.generation.
 var nextForkGen uint64
 
-// Fork creates a new copy-on-write overlay rooted at base.
+// Fork creates a new copy-on-write overlay rooted at base under the default
+// agent. Equivalent to ForkForAgent(AgentDefault, base).
+func (v *VST) Fork(base types.SnapshotID) (*Fork, error) {
+	return v.ForkForAgent(AgentDefault, base)
+}
+
+// ForkForAgent creates a new copy-on-write overlay rooted at base under the
+// named agent. The fork's MergeInto will advance only branches registered
+// under this agent; cross-agent branches are not visible.
+//
 // The base snapshot must exist either in-memory or in the attached L2 store.
 // Multiple Forks from the same base may be used concurrently.
 //
 // Discard MUST be called when the fork is no longer needed; a runtime finalizer
 // is wired as a defensive safety net but should not be relied upon.
-func (v *VST) Fork(base types.SnapshotID) (*Fork, error) {
+func (v *VST) ForkForAgent(agent AgentId, base types.SnapshotID) (*Fork, error) {
 	v.mu.RLock()
 	snap, ok := v.snaps[base]
 	v.mu.RUnlock()
@@ -133,6 +145,7 @@ func (v *VST) Fork(base types.SnapshotID) (*Fork, error) {
 	}
 
 	f := &Fork{
+		agent:      normaliseAgent(agent),
 		base:       base,
 		baseSnap:   snap, // immutable reference; safe to share across forks
 		overlay:    make(map[string]types.Hash),
@@ -144,6 +157,9 @@ func (v *VST) Fork(base types.SnapshotID) (*Fork, error) {
 	runtime.SetFinalizer(f, func(g *Fork) { g.Discard() })
 	return f, nil
 }
+
+// Agent returns the AgentId this fork was opened under.
+func (f *Fork) Agent() AgentId { return f.agent }
 
 // Base returns the immutable base snapshot id this fork was created from.
 func (f *Fork) Base() types.SnapshotID { return f.base }
@@ -356,7 +372,8 @@ func (f *Fork) MergeInto(branch BranchID) (types.SnapshotID, error) {
 
 	// --- Phase 3: atomic CAS on branch head + install snapshot in VST ---
 	v.mu.Lock()
-	cur, ok := v.branches[branch]
+	agentState := v.agentRW(f.agent)
+	cur, ok := agentState.branches[branch]
 	if !ok {
 		v.mu.Unlock()
 		return "", ErrUnknownBranch
@@ -373,9 +390,9 @@ func (f *Fork) MergeInto(branch BranchID) (types.SnapshotID, error) {
 	}
 	v.snaps[newID] = storedSnap
 	for path, h := range overlayCopy {
-		v.pathToHash[path] = h
+		agentState.pathToHash[path] = h
 	}
-	v.branches[branch] = newID
+	agentState.branches[branch] = newID
 	l2 := v.l2
 	v.mu.Unlock()
 
