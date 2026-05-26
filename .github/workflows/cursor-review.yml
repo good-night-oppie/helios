@@ -1,0 +1,81 @@
+name: Cursor Code Review
+
+# Backup code-review workflow. Runs cursor-agent (model: auto) in parallel
+# with the primary anthropics/claude-code-action so a review is still posted
+# when the Claude path is unavailable (org subscription disabled, OAuth
+# token revoked, upstream action outage, etc.).
+#
+# Auth: CURSOR_API_KEY repo secret. If absent, the job exits 0 with a
+# warning so missing secrets do not turn the PR red.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  cursor-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - name: Install cursor-agent CLI
+        run: |
+          curl https://cursor.com/install -fsSL | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify install
+        run: cursor-agent --version
+
+      - name: Run code review
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CURSOR_API_KEY:-}" ]; then
+            echo "::warning::CURSOR_API_KEY secret not set; skipping cursor review"
+            exit 0
+          fi
+
+          DIFF=$(gh pr diff "$PR_NUMBER" --repo "$PR_REPO")
+
+          PROMPT_HEAD='You are an automated code reviewer for the Go + Rust repository `good-night-oppie/helios`. Apply the **Code Review Pyramid** — weight findings by layer; lower layers carry higher severity.
+
+          Pyramid layers (lowest = highest priority):
+          1. **API / Contract** — exported function signatures, FFI boundaries, public types, breaking changes. Defects here are blockers.
+          2. **Implementation** — logic correctness, error handling, concurrency (race conditions, lock ordering, TOCTOU), memory safety (nil-deref, double-free, leaks), security (injection, auth flaws, secrets in logs).
+          3. **Tests** — coverage of new branches and edge cases (nil, empty, error paths); race tests (`go test -race`) for concurrent code; `#[should_panic]` or property tests in Rust where warranted.
+          4. **Documentation** — godoc/rustdoc on exported APIs; comments only where the *why* is non-obvious; CHANGELOG entry for user-visible changes.
+          5. **Style** — formatting (`gofmt`, `cargo fmt`), naming, idiomatic patterns. Lowest severity; skip unless a tool would flag it.
+
+          Repo conventions: if `CLAUDE.md` appears in the diff context, follow its directives. Otherwise rely on standard Go and Rust idioms.
+
+          Output rules (strict):
+          - Group findings under `## Layer N — <Name>` headers, in pyramid order (1 first).
+          - Cite every finding as `path/to/file.ext:LINE` (or `:LINE-LINE` for a range). A finding without a citation is invalid.
+          - One bullet per finding. Maximum 12 total. Prefer fewer, sharper observations.
+          - Mark uncertain findings explicitly: `(uncertain — verify by <action>)`. Never bury speculation in a confident bullet.
+          - Forbidden: inventing issues with no anchor in the diff; citing lines absent from the diff; suggesting changes to files not present in the diff; generic advice without a specific citation.
+          - If the diff is clean: output a single line `LGTM — no blocking findings.` You may add up to 3 optional nits below it, each still cited.
+          - End the comment with one summary line, e.g. `Summary: 2 blockers (Layer 2), 1 nit (Layer 5).`
+
+          PR diff follows in the next fenced block:'
+
+          FULL_PROMPT="${PROMPT_HEAD}"$'\n\n'"\`\`\`diff"$'\n'"${DIFF}"$'\n'"\`\`\`"
+
+          REVIEW=$(cursor-agent \
+            --print \
+            --mode ask \
+            --model auto \
+            --force \
+            --output-format text \
+            "$FULL_PROMPT")
+
+          BODY=$'## Cursor Code Review (auto-backup)\n\n'"${REVIEW}"$'\n\n---\n_Posted by `cursor-agent` (model: `auto`) via the `cursor-review` workflow as a backup to `claude-review`._'
+
+          gh pr comment "$PR_NUMBER" --repo "$PR_REPO" --body "$BODY"
