@@ -16,6 +16,7 @@
 package fuzz
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -25,6 +26,22 @@ import (
 	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
+// sandboxCWD chdirs into t.TempDir() for the duration of the test to contain
+// any disk writes from vst.WriteFile (see helios issue #42). Without this,
+// fuzz inputs like "../y" and "a/b.go" would escape into the test's package
+// directory and break subsequent `go list ./...` in CI.
+func sandboxCWD(t *testing.T) {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+}
+
 func FuzzPathRoundTrip(f *testing.F) {
 	seed := []string{"a.txt", "dir/b.txt", "weird_字符/空 白.md", "./x", "../y"}
 	for _, s := range seed {
@@ -32,6 +49,7 @@ func FuzzPathRoundTrip(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, path string) {
+		sandboxCWD(t)
 		// Skip obviously insane inputs to keep fuzz time short
 		if path == "" || !utf8.ValidString(path) || len(path) > 2048 {
 			t.Skip()
@@ -65,6 +83,7 @@ func FuzzMaterializeSelectors(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, glob string) {
+		sandboxCWD(t)
 		if strings.Contains(glob, "\x00") || len(glob) > 256 {
 			t.Skip()
 		}

@@ -74,6 +74,9 @@ func (f *FakeEngine) EngineMetricsSnapshot() metrics.Snapshot {
 	return metrics.Snapshot{}
 }
 
+// Close satisfies Engine.Close. The fake holds no resources.
+func (f *FakeEngine) Close() error { return nil }
+
 func TestHandleCommit(t *testing.T) {
 	tests := []struct {
 		name     string
