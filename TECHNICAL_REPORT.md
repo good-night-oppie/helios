@@ -206,6 +206,78 @@ func (v *VST) CreateBranch(baseSnapshot SnapshotID) SnapshotID {
 
 **Why these optimizations matter for AI**: Reduces commit time from ~173μs to ~70μs, enabling 14,000+ commits per second for high-frequency AI experimentation.
 
+## In-process Primitives for Multi-Agent Runtimes
+
+Subprocess-per-checkpoint (the CLI path) is too expensive for hot agent loops
+that run thousands of iterations per second. Helios ships two in-process
+primitives consumed by runtimes like ionq:
+
+### 1. CGO c-archive + Rust bindings (Vector A, P0.1)
+
+`go build -buildmode=c-archive ./cmd/heliosffi` produces `libhelios.a` +
+`libhelios.h`. The exported uint64 opaque-handle ABI covers VST lifecycle,
+working-set I/O, commit/restore, branches, and the Fork primitive below.
+
+The Rust workspace at `bindings/rust/` ships:
+
+- `helios-sys` — handwritten `extern "C"` declarations (no bindgen dep).
+- `helios-rs` — safe wrapper with `Vst` / `Fork` / `SnapshotId` types,
+  `thiserror`-backed error enum, lifetime-bound forks, and Drop-on-discard.
+
+Measured per-op latency from the Rust example
+(`bindings/rust/examples/helios_smoke.rs`, Intel Xeon 8259CL, release):
+
+| Op                     | Wall |
+|------------------------|------|
+| `Vst::new` (warm)      |  2 µs |
+| `commit` (1 file)      | 80 µs |
+| `fork`                 |  3 µs |
+| `fork.write` (overlay) |  2 µs |
+| `fork.merge_into`      | 17 µs |
+| `restore` (in-memory)  |  3 µs |
+
+### 2. VFSFork overlay primitive (Vector B, P0.2)
+
+`pkg/helios/vst/fork.go` adds a copy-on-write overlay on top of an immutable
+base SnapshotID. Fork writes stay in RAM (no RocksDB I/O) until
+`MergeInto(branch)` succeeds via an atomic compare-and-swap on a named
+branch head. Loser forks see `ErrBranchStale` and may rebase + retry; the
+fork is not consumed on a failed merge.
+
+API surface (in `package vst`):
+
+```go
+type BranchID string
+type Change   struct { Path string; Kind ChangeKind; OldHash, NewHash types.Hash }
+
+func (v *VST) Fork(base SnapshotID) (*Fork, error)
+func (v *VST) CreateBranch(name BranchID, head SnapshotID) error
+func (v *VST) BranchHead(name BranchID) (SnapshotID, bool)
+
+func (f *Fork) Read(path string)  ([]byte, error)
+func (f *Fork) Write(path, content []byte) error
+func (f *Fork) Delete(path string) error
+func (f *Fork) Diff() []Change
+func (f *Fork) MergeInto(branch BranchID) (SnapshotID, error)  // CAS or ErrBranchStale
+func (f *Fork) Discard()                                       // mandatory; finalizer fallback
+```
+
+Acceptance microbench (in `fork_bench_test.go`):
+
+| Bench                          | Wall   | Target |
+|--------------------------------|--------|--------|
+| `Fork`+`Write`+`Discard`       | 1.3 µs | ≤ 50 µs |
+| `MergeInto` (in-mem)           | 7.7 µs | ≤ 100 µs |
+| Read passthrough (overlay miss)| 59 ns  | —       |
+
+Concurrency guarantees are validated by `TestFork_ParallelDivergent`
+(32 forks × 100 ops on disjoint branches, `-race` clean) and
+`TestFork_ParallelSameBranchCAS` (16 racers competing on the same branch
+with rebase-retry; exactly K winners).
+
+See `docs/ionq-integration.md` for the full FFI contract, error code
+table, and ownership / threading rules.
+
 ## Practical AI Integration Patterns
 
 ### The Standard AI Agent Workflow

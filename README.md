@@ -166,6 +166,38 @@ for experiment in range(100):
 - **CodeT5/StarCoder**: Version all generated variants
 - **Custom LLM workflows**: Drop-in replacement for Git commands
 
+### In-process Rust bindings (for hot agent loops)
+
+For multi-agent runtimes that cannot afford subprocess overhead per iteration,
+Helios exposes a CGO c-archive (`cmd/heliosffi`) and a safe Rust wrapper
+(`bindings/rust/helios-rs`) over the VST + VFSFork primitives.
+
+```bash
+# Build the c-archive (libhelios.a + libhelios.h)
+make ffi-archive
+
+# Run the Rust round-trip smoke test (~init→commit→fork→merge in microseconds)
+make rust-smoke
+```
+
+```rust
+use helios_rs::{BranchId, Vst};
+
+let v = Vst::new();
+v.write_file("agent.py", b"print('iter 0')")?;
+let base = v.commit("seed")?;
+let branch: BranchId = "main".into();
+v.create_branch(&branch, &base)?;
+
+// Propose without committing: fork-write-merge-or-discard
+let fork = v.fork(&base)?;
+fork.write("agent.py", b"print('iter 1')")?;
+let new_id = fork.merge_into(&branch).map_err(|(_, e)| e)?;
+```
+
+See [`docs/ionq-integration.md`](docs/ionq-integration.md) for the full FFI
+contract, error code table, and ionq Vector A/B integration notes.
+
 ## System Requirements
 
 - **OS**: Linux, macOS, or Windows  

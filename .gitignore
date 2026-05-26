@@ -48,6 +48,13 @@ bin/
 *.so
 *.dylib
 
+# FFI bridge build artefacts (cgo c-archive + cgo-generated header + C smoke binary)
+bindings/c/libhelios.a
+bindings/c/libhelios.h
+bindings/c/smoke
+bindings/rust/target/
+bindings/rust/Cargo.lock
+
 # Test outputs
 test-results/
 playwright-report/
