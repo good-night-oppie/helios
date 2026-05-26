@@ -44,17 +44,27 @@ jobs:
 
           DIFF=$(gh pr diff "$PR_NUMBER" --repo "$PR_REPO")
 
-          PROMPT_HEAD='You are reviewing a GitHub pull-request diff. Provide concise, actionable code-review feedback on:
+          PROMPT_HEAD='You are an automated code reviewer for the Go + Rust repository `good-night-oppie/helios`. Apply the **Code Review Pyramid** — weight findings by layer; lower layers carry higher severity.
 
-          - Correctness bugs (logic errors, off-by-one, nil-deref, race conditions)
-          - Security concerns (injection, auth flaws, secrets in logs)
-          - Performance issues
-          - Test coverage gaps
-          - Repo conventions (consult CLAUDE.md in the repo root if present)
+          Pyramid layers (lowest = highest priority):
+          1. **API / Contract** — exported function signatures, FFI boundaries, public types, breaking changes. Defects here are blockers.
+          2. **Implementation** — logic correctness, error handling, concurrency (race conditions, lock ordering, TOCTOU), memory safety (nil-deref, double-free, leaks), security (injection, auth flaws, secrets in logs).
+          3. **Tests** — coverage of new branches and edge cases (nil, empty, error paths); race tests (`go test -race`) for concurrent code; `#[should_panic]` or property tests in Rust where warranted.
+          4. **Documentation** — godoc/rustdoc on exported APIs; comments only where the *why* is non-obvious; CHANGELOG entry for user-visible changes.
+          5. **Style** — formatting (`gofmt`, `cargo fmt`), naming, idiomatic patterns. Lowest severity; skip unless a tool would flag it.
 
-          Cite file:line. Limit to ~10 bullet points. If the diff LGTM with no concerns, say so explicitly. Do not invent issues.
+          Repo conventions: if `CLAUDE.md` appears in the diff context, follow its directives. Otherwise rely on standard Go and Rust idioms.
 
-          PR diff follows:'
+          Output rules (strict):
+          - Group findings under `## Layer N — <Name>` headers, in pyramid order (1 first).
+          - Cite every finding as `path/to/file.ext:LINE` (or `:LINE-LINE` for a range). A finding without a citation is invalid.
+          - One bullet per finding. Maximum 12 total. Prefer fewer, sharper observations.
+          - Mark uncertain findings explicitly: `(uncertain — verify by <action>)`. Never bury speculation in a confident bullet.
+          - Forbidden: inventing issues with no anchor in the diff; citing lines absent from the diff; suggesting changes to files not present in the diff; generic advice without a specific citation.
+          - If the diff is clean: output a single line `LGTM — no blocking findings.` You may add up to 3 optional nits below it, each still cited.
+          - End the comment with one summary line, e.g. `Summary: 2 blockers (Layer 2), 1 nit (Layer 5).`
+
+          PR diff follows in the next fenced block:'
 
           FULL_PROMPT="${PROMPT_HEAD}"$'\n\n'"\`\`\`diff"$'\n'"${DIFF}"$'\n'"\`\`\`"
 
