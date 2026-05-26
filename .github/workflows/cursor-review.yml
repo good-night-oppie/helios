@@ -62,6 +62,7 @@ jobs:
             --print \
             --mode ask \
             --model auto \
+            --force \
             --output-format text \
             "$FULL_PROMPT")
 
