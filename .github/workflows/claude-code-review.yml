@@ -19,6 +19,12 @@ jobs:
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
     
     runs-on: ubuntu-latest
+    env:
+      # Workaround: anthropics/claude-code-action@v1 trips a Node 20 fs
+      # consistency check on its own bundled tsconfig.json
+      # ("directory mismatch for directory ... tsconfig.json, fd 4").
+      # Forcing the action runtime to Node 24 avoids the Node 20-specific bug.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     permissions:
       contents: read
       pull-requests: read
