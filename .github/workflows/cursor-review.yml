@@ -1,0 +1,70 @@
+name: Cursor Code Review
+
+# Backup code-review workflow. Runs cursor-agent (model: auto) in parallel
+# with the primary anthropics/claude-code-action so a review is still posted
+# when the Claude path is unavailable (org subscription disabled, OAuth
+# token revoked, upstream action outage, etc.).
+#
+# Auth: CURSOR_API_KEY repo secret. If absent, the job exits 0 with a
+# warning so missing secrets do not turn the PR red.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  cursor-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - name: Install cursor-agent CLI
+        run: |
+          curl https://cursor.com/install -fsSL | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify install
+        run: cursor-agent --version
+
+      - name: Run code review
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CURSOR_API_KEY:-}" ]; then
+            echo "::warning::CURSOR_API_KEY secret not set; skipping cursor review"
+            exit 0
+          fi
+
+          DIFF=$(gh pr diff "$PR_NUMBER" --repo "$PR_REPO")
+
+          PROMPT_HEAD='You are reviewing a GitHub pull-request diff. Provide concise, actionable code-review feedback on:
+
+          - Correctness bugs (logic errors, off-by-one, nil-deref, race conditions)
+          - Security concerns (injection, auth flaws, secrets in logs)
+          - Performance issues
+          - Test coverage gaps
+          - Repo conventions (consult CLAUDE.md in the repo root if present)
+
+          Cite file:line. Limit to ~10 bullet points. If the diff LGTM with no concerns, say so explicitly. Do not invent issues.
+
+          PR diff follows:'
+
+          FULL_PROMPT="${PROMPT_HEAD}"$'\n\n'"\`\`\`diff"$'\n'"${DIFF}"$'\n'"\`\`\`"
+
+          REVIEW=$(cursor-agent \
+            --print \
+            --mode ask \
+            --model auto \
+            --output-format text \
+            "$FULL_PROMPT")
+
+          BODY=$'## Cursor Code Review (auto-backup)\n\n'"${REVIEW}"$'\n\n---\n_Posted by `cursor-agent` (model: `auto`) via the `cursor-review` workflow as a backup to `claude-review`._'
+
+          gh pr comment "$PR_NUMBER" --repo "$PR_REPO" --body "$BODY"
