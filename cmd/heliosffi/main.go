@@ -98,13 +98,41 @@ func lookupFork(id uint64) *vst.Fork {
 
 // cBufFromBytes copies a Go slice into a C.malloc'd buffer and writes its
 // pointer + length through the supplied out params. Returns cOK on success.
-// The caller must helios_buffer_free the returned pointer.
+// The caller must helios_buffer_free the returned pointer (safe to call on
+// NULL — Go side helios_buffer_free no-ops on nil).
+//
+// Three-way encoding so callers can distinguish "missing" from "present
+// but empty":
+//
+//	data == nil               → (*outBuf = NULL,        *outLen = 0)
+//	                            interpreted as "path does not exist"
+//	data != nil, len(data)==0 → (*outBuf = malloc(1),   *outLen = 0)
+//	                            interpreted as "path exists, zero bytes"
+//	len(data) > 0             → (*outBuf = malloc(len), *outLen = len)
+//
+// The empty-but-present case allocates a 1-byte placeholder so that a
+// caller checking `out_buf != NULL` correctly sees an existing empty file
+// rather than mistaking it for absence. The reported length is still 0 so
+// no reader will dereference the placeholder; helios_buffer_free reclaims
+// the byte. See PR #39 review for the round-trip failure this fixes.
 func cBufFromBytes(data []byte, outBuf **C.uchar, outLen *C.size_t) C.int {
 	if outBuf == nil || outLen == nil {
 		return cErrInvalidArg
 	}
-	if len(data) == 0 {
+	if data == nil {
+		// Absent path: NULL + 0 = "not found".
 		*outBuf = nil
+		*outLen = 0
+		return cOK
+	}
+	if len(data) == 0 {
+		// Present empty path: distinguish from nil by allocating a single
+		// byte placeholder. Length stays 0; consumers must not read it.
+		p := C.malloc(1)
+		if p == nil {
+			return cErrInternal
+		}
+		*outBuf = (*C.uchar)(p)
 		*outLen = 0
 		return cOK
 	}
