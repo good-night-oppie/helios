@@ -363,10 +363,21 @@ unsafe impl<'v> Sync for Fork<'v> {}
 // ---------------------------------------------------------------------------
 
 fn copy_owned_buffer(buf: *mut u8, len: usize) -> Option<Vec<u8>> {
+    // Three-way encoding from cBufFromBytes in cmd/heliosffi/main.go:
+    //   NULL                  -> None       (path absent)
+    //   non-NULL,  len == 0   -> Some(vec![]) (path present, zero bytes)
+    //   non-NULL,  len > 0    -> Some(bytes)
     if buf.is_null() {
-        // Treat NULL as "not present" for read paths (matches VST.ReadFile
-        // semantics where missing → (nil, nil)).
         return None;
+    }
+    if len == 0 {
+        // Empty-but-present sentinel: Go allocated a 1-byte placeholder so
+        // we can distinguish absence from emptiness. We must NOT read it
+        // (its contents are uninitialised) but we still own it and must
+        // hand it back to helios_buffer_free.
+        // SAFETY: buf was allocated by C.malloc on the Go side.
+        unsafe { sys::helios_buffer_free(buf); }
+        return Some(Vec::new());
     }
     // SAFETY: Go-side guarantees buf was malloc'd with `len` valid bytes.
     let bytes = unsafe { slice::from_raw_parts(buf, len) };
@@ -391,6 +402,46 @@ fn copy_owned_string(ptr: *mut i8, len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // PR #39 review follow-up: write b"" then read back must yield
+    // Some(vec![]) — NOT None. None means "absent"; an existing empty
+    // file is a distinct state. Before the fix, cBufFromBytes returned
+    // NULL for both nil and []byte{}, collapsing the two states on the
+    // Rust side.
+    #[test]
+    fn test_empty_file_roundtrip_vst() {
+        let v = Vst::new();
+        v.write_file("empty.txt", b"").unwrap();
+        let got = v.read_file("empty.txt").unwrap();
+        assert_eq!(got, Some(Vec::new()), "VST: empty file must be Some(vec![]) not None");
+
+        // Absent file must still read back as None.
+        let missing = v.read_file("does_not_exist.txt").unwrap();
+        assert_eq!(missing, None, "VST: absent file must read back as None");
+
+        // Round-trip survives commit → fork → read.
+        let base = v.commit("seed").unwrap();
+        let branch: BranchId = "main".into();
+        v.create_branch(&branch, &base).unwrap();
+
+        let f = v.fork(&base).unwrap();
+        let from_fork_base = f.read("empty.txt").unwrap();
+        assert_eq!(
+            from_fork_base,
+            Some(Vec::new()),
+            "Fork base passthrough: empty file must be Some(vec![]) not None"
+        );
+
+        // Fork-overlay empty write also round-trips.
+        f.write("overlay_empty.txt", b"").unwrap();
+        let from_overlay = f.read("overlay_empty.txt").unwrap();
+        assert_eq!(
+            from_overlay,
+            Some(Vec::new()),
+            "Fork overlay: empty file must be Some(vec![]) not None"
+        );
+        f.discard();
+    }
 
     #[test]
     fn end_to_end_fork_merge() {
