@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
 // TestVST_AgentPathIsolation: two agents writing the same path must read
@@ -274,5 +276,105 @@ func TestVST_ConcurrentAgentsWrites(t *testing.T) {
 				t.Fatalf("read k=%d i=%d: got=%q want=%q", k, i, got, want)
 			}
 		}
+	}
+}
+
+// TestVST_CommitOptimizedForAgent_ConcurrentRace fires K goroutines that
+// concurrently Write + CommitOptimizedForAgent + Write under distinct
+// AgentIds. Pre-fix, the unlocked agentRW + s.cur swap + v.snaps write
+// would race the agents-map insert from another goroutine and either
+// panic ("fatal: concurrent map writes") or corrupt state. Under -race
+// this exercise must run cleanly and each agent's post-commit
+// working-set state must be empty (COW swap installed a fresh empty
+// map) until the next round of writes populates it again.
+func TestVST_CommitOptimizedForAgent_ConcurrentRace(t *testing.T) {
+	const (
+		K      = 8
+		Rounds = 50
+	)
+	v := New()
+
+	var wg sync.WaitGroup
+	wg.Add(K)
+	for k := 0; k < K; k++ {
+		go func(k int) {
+			defer wg.Done()
+			agent := AgentId(fmt.Sprintf("commit-agent-%d", k))
+			for r := 0; r < Rounds; r++ {
+				path := fmt.Sprintf("r%d.txt", r)
+				if err := v.WriteFileForAgent(agent, path, []byte(fmt.Sprintf("k%d-r%d", k, r))); err != nil {
+					t.Errorf("write k=%d r=%d: %v", k, r, err)
+					return
+				}
+				if _, _, err := v.CommitOptimizedForAgent(agent, ""); err != nil {
+					t.Errorf("commit-optimized k=%d r=%d: %v", k, r, err)
+					return
+				}
+			}
+		}(k)
+	}
+	wg.Wait()
+
+	// After Rounds rounds, every agent should have a committed snapshot
+	// installed in v.snaps. We can't easily inspect snaps here without
+	// exposing internals, so just verify that reads of the latest-written
+	// path return either the latest value (race: write→read with no commit
+	// in between) or nil (COW swap removed all entries post-commit).
+	for k := 0; k < K; k++ {
+		agent := AgentId(fmt.Sprintf("commit-agent-%d", k))
+		got, err := v.ReadFileForAgent(agent, "r0.txt")
+		if err != nil {
+			t.Fatalf("post-loop read agent=%s: %v", agent, err)
+		}
+		_ = got // value depends on COW timing; we only assert no error / no race
+	}
+}
+
+// TestVST_RestoreForAgent_Isolation: restoring a snapshot into agent_a
+// must not perturb agent_b's working state. Cross-tenant isolation
+// invariant.
+func TestVST_RestoreForAgent_Isolation(t *testing.T) {
+	v := New()
+	const a, b AgentId = "alpha", "beta"
+
+	// Seed both agents with distinct content.
+	if err := v.WriteFileForAgent(a, "p", []byte("a-original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.WriteFileForAgent(b, "p", []byte("b-original")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit + over-write alpha so its cur diverges from the committed snap.
+	saSeed, _, err := v.CommitForAgent(a, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.WriteFileForAgent(a, "p", []byte("a-mutated")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore alpha back to its seeded snapshot. Restore writes to
+	// filesystem by default, so use DryRun=true to scope this to memory.
+	if err := v.RestoreForAgent(a, saSeed, types.RestoreOpts{DryRun: true}); err != nil {
+		t.Fatalf("restore alpha: %v", err)
+	}
+
+	// Alpha's read returns the restored content.
+	gotA, err := v.ReadFileForAgent(a, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotA) != "a-original" {
+		t.Fatalf("alpha post-restore: got=%q want=a-original", gotA)
+	}
+
+	// Beta's working set is untouched.
+	gotB, err := v.ReadFileForAgent(b, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotB) != "b-original" {
+		t.Fatalf("beta post-alpha-restore: got=%q want=b-original (cross-tenant leak)", gotB)
 	}
 }

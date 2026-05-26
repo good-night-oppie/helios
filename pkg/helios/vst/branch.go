@@ -86,7 +86,17 @@ func (v *VST) Branches() map[BranchID]types.SnapshotID {
 
 // BranchesForAgent returns a snapshot of the named agent's branch map.
 // The returned map is a defensive copy; mutating it does not affect VST state.
-// Returns an empty (non-nil) map if the agent has no branches yet.
+//
+// Returns an empty (non-nil) map in two indistinguishable cases:
+//   - the agent has never been seen by the VST (no agentState entry), or
+//   - the agent has been written to but has not registered any branches.
+//
+// This is asymmetric with BranchHeadForAgent which returns ok=false on
+// both miss cases. The contract is intentional: the public API never
+// exposes whether an agent has internal state, only whether a specific
+// branch / path is registered. Callers should not conflate "agent
+// unknown" with "agent has zero branches" — the runtime treats both as
+// "nothing to return" by design.
 func (v *VST) BranchesForAgent(agent AgentId) map[BranchID]types.SnapshotID {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

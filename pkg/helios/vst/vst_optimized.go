@@ -38,33 +38,43 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 }
 
 // CommitOptimizedForAgent is the agent-aware variant of CommitOptimized.
+//
+// Locking discipline mirrors CommitForAgent: short critical sections around
+// every mutation of `v.agents`, `agentState.cur`, `agentState.pathToHash`,
+// and `v.snaps`. Pure-CPU work (hashing, Merkle-tree build) and L2 I/O
+// (PutBatch) happen outside the lock so concurrent agents do not block on
+// each other for the slow path.
+//
+// Pre-VA-1a this function was already racy on `v.cur` / `v.pathToHash` /
+// `v.snaps`. With multi-tenant `agents` map it became fatally racy because
+// `agentRW` lazily inserts into `v.agents` — an unlocked insert collides
+// with a concurrent map write and panics. Locking is now mandatory.
 func (v *VST) CommitOptimizedForAgent(agent AgentId, msg string) (types.SnapshotID, types.CommitMetrics, error) {
 	_ = msg // commit message currently unused (parity with Commit)
 	start := time.Now()
 
-	// OPTIMIZATION 1: Copy-on-Write (COW) snapshot
-	// Instead of deep copying, share references and create new working set
+	// Phase 1 — COW snapshot of cur under write lock.
+	// agentRW may mutate v.agents; the cur reference swap mutates agentState.
+	v.mu.Lock()
 	s := v.agentRW(agent)
-	snap := s.cur                                  // Share reference to current working set
-	s.cur = make(map[string][]byte, len(snap))     // New working set for future modifications
+	snap := s.cur                              // Share reference to current working set
+	s.cur = make(map[string][]byte, len(snap)) // New working set for future modifications
+	v.mu.Unlock()
 
 	var newBytes int64
 	for _, val := range snap {
 		newBytes += int64(len(val))
 	}
 
-	// OPTIMIZATION 2: Batch compute all blob hashes
+	// Phase 2 — hash all blobs (pure CPU, no shared state mutated).
 	blobHashByPath := make(map[string]types.Hash, len(snap))
 	blobsToStore := make([]objstore.BatchEntry, 0, len(snap))
-
 	for path, content := range snap {
 		h, err := util.HashBlob(content)
 		if err != nil {
 			return "", types.CommitMetrics{}, err
 		}
 		blobHashByPath[path] = h
-		s.pathToHash[path] = h
-
 		if v.l2 != nil {
 			blobsToStore = append(blobsToStore, objstore.BatchEntry{
 				Hash:  h,
@@ -73,41 +83,49 @@ func (v *VST) CommitOptimizedForAgent(agent AgentId, msg string) (types.Snapshot
 		}
 	}
 
-	// Store blobs in L2 if attached
+	// Phase 3 — install pathToHash under write lock. `s` ptr captured in
+	// Phase 1 is stable because agentRW never replaces an existing
+	// agentState, only inserts a new one if absent.
+	v.mu.Lock()
+	for path, h := range blobHashByPath {
+		s.pathToHash[path] = h
+	}
+	v.mu.Unlock()
+
+	// Phase 4 — L2 blob batch (outside lock; I/O dominates).
 	if v.l2 != nil && len(blobsToStore) > 0 {
 		if err := v.l2.PutBatch(blobsToStore); err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to store blobs in L2: %w", err)
 		}
 	}
 
-	// OPTIMIZATION 3: Efficient O(n) directory tree building
+	// Phase 5 — O(n) Merkle tree build (pure CPU).
 	root, err := v.buildDirectoryTreeOptimized(blobHashByPath)
 	if err != nil {
 		return "", types.CommitMetrics{}, err
 	}
-
 	id := types.SnapshotID(root.String())
 
-	// Store snapshot metadata in L2
+	// Phase 6 — L2 snapshot metadata (outside lock).
 	if v.l2 != nil {
 		metadataBytes, err := json.Marshal(blobHashByPath)
 		if err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to marshal snapshot metadata: %w", err)
 		}
-		
 		snapshotKey := "snapshot:" + string(id)
 		snapshotMetadata := []objstore.BatchEntry{{
-			Hash: types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
+			Hash:  types.Hash{Algorithm: types.BLAKE3, Digest: []byte(snapshotKey)},
 			Value: metadataBytes,
 		}}
-		
 		if err := v.l2.PutBatch(snapshotMetadata); err != nil {
 			return "", types.CommitMetrics{}, fmt.Errorf("failed to store snapshot metadata: %w", err)
 		}
 	}
 
-	// Store snapshot using COW reference
+	// Phase 7 — install v.snaps[id] under write lock (shared snap store).
+	v.mu.Lock()
 	v.snaps[id] = snap
+	v.mu.Unlock()
 
 	commitMetrics := types.CommitMetrics{
 		CommitLatency: time.Since(start),
