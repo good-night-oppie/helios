@@ -132,6 +132,9 @@ func (v *VST) Fork(base types.SnapshotID) (*Fork, error) {
 // Discard MUST be called when the fork is no longer needed; a runtime finalizer
 // is wired as a defensive safety net but should not be relied upon.
 func (v *VST) ForkForAgent(agent AgentId, base types.SnapshotID) (*Fork, error) {
+	if err := validateAgent(agent); err != nil {
+		return nil, err
+	}
 	v.mu.RLock()
 	snap, ok := v.snaps[base]
 	v.mu.RUnlock()

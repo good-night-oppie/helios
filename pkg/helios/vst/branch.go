@@ -40,6 +40,9 @@ func (v *VST) CreateBranch(name BranchID, head types.SnapshotID) error {
 // only if an empty-tree snapshot has been committed; otherwise callers must
 // commit first and then CreateBranch with the resulting id).
 func (v *VST) CreateBranchForAgent(agent AgentId, name BranchID, head types.SnapshotID) error {
+	if err := validateAgent(agent); err != nil {
+		return err
+	}
 	if name == "" {
 		return fmt.Errorf("vst.CreateBranch: empty branch name")
 	}
@@ -68,6 +71,9 @@ func (v *VST) BranchHead(name BranchID) (types.SnapshotID, bool) {
 // Returns ok=false if either the agent has no state yet or the branch is
 // not registered under that agent.
 func (v *VST) BranchHeadForAgent(agent AgentId, name BranchID) (types.SnapshotID, bool) {
+	if validateAgent(agent) != nil {
+		return "", false
+	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	s, ok := v.agentRO(agent)
@@ -98,6 +104,9 @@ func (v *VST) Branches() map[BranchID]types.SnapshotID {
 // unknown" with "agent has zero branches" — the runtime treats both as
 // "nothing to return" by design.
 func (v *VST) BranchesForAgent(agent AgentId) map[BranchID]types.SnapshotID {
+	if validateAgent(agent) != nil {
+		return map[BranchID]types.SnapshotID{}
+	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	s, ok := v.agentRO(agent)
@@ -120,6 +129,9 @@ func (v *VST) DeleteBranch(name BranchID) error {
 // DeleteBranchForAgent removes the named branch from the named agent.
 // Returns ErrUnknownBranch if the branch is not registered under that agent.
 func (v *VST) DeleteBranchForAgent(agent AgentId, name BranchID) error {
+	if err := validateAgent(agent); err != nil {
+		return err
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	s, ok := v.agentRO(agent)

@@ -89,6 +89,9 @@ func (v *VST) WriteFile(path string, content []byte) error {
 // set (in memory only). The agent's per-tenant state is lazily created on
 // first write.
 func (v *VST) WriteFileForAgent(agent AgentId, path string, content []byte) error {
+	if err := validateAgent(agent); err != nil {
+		return err
+	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	v.mu.Lock()
@@ -104,8 +107,12 @@ func (v *VST) DeleteFile(path string) {
 }
 
 // DeleteFileForAgent removes a file from the named agent's working set.
-// No-op for unknown agents (no state to delete from).
+// No-op for unknown agents (no state to delete from) and silently skips
+// invalid (non-UTF-8) AgentIds since this method does not return an error.
 func (v *VST) DeleteFileForAgent(agent AgentId, path string) {
+	if validateAgent(agent) != nil {
+		return
+	}
 	v.mu.Lock()
 	if s, ok := v.agentRO(agent); ok {
 		delete(s.cur, path)
@@ -124,6 +131,9 @@ func (v *VST) ReadFile(path string) ([]byte, error) {
 // If the file is not in memory but L1/L2 stores are attached, it tries
 // L1 then L2 via the agent's path-to-hash map.
 func (v *VST) ReadFileForAgent(agent AgentId, path string) ([]byte, error) {
+	if err := validateAgent(agent); err != nil {
+		return nil, err
+	}
 	// First check current working set
 	v.mu.RLock()
 	var (
@@ -188,6 +198,9 @@ func (v *VST) Commit(msg string) (types.SnapshotID, types.CommitMetrics, error) 
 // The returned SnapshotID is content-addressed: identical content from
 // any agent yields the same SnapshotID and shares storage in v.snaps.
 func (v *VST) CommitForAgent(agent AgentId, msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	if err := validateAgent(agent); err != nil {
+		return "", types.CommitMetrics{}, err
+	}
 	_ = msg // commit message currently unused (parity with Commit)
 	start := time.Now()
 
@@ -430,6 +443,9 @@ func (v *VST) RestoreWithOpts(id types.SnapshotID, opts types.RestoreOpts) error
 // - DryRun: when true, only restores to memory without filesystem writes
 // - WriteToFilesystem: when true, writes restored files to disk atomically
 func (v *VST) RestoreForAgent(agent AgentId, id types.SnapshotID, opts types.RestoreOpts) error {
+	if err := validateAgent(agent); err != nil {
+		return err
+	}
 	v.mu.RLock()
 	base, ok := v.snaps[id]
 	dprintf("starting restore of snapshot %s (in-memory snapshots=%d)", id, len(v.snaps))

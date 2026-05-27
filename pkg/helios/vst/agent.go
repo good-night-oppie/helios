@@ -15,6 +15,9 @@
 package vst
 
 import (
+	"errors"
+	"unicode/utf8"
+
 	"github.com/good-night-oppie/helios/pkg/helios/types"
 )
 
@@ -28,6 +31,21 @@ type AgentId string
 // All non-agent-qualified methods (WriteFile, CreateBranch, Fork, ...) act
 // on this agent so existing callers keep working unchanged.
 const AgentDefault AgentId = "default"
+
+// ErrInvalidAgent is returned by error-returning *ForAgent methods when the
+// supplied AgentId is not valid UTF-8. Void / boolean methods treat invalid
+// IDs as a silent miss (no-op delete, not-found read).
+var ErrInvalidAgent = errors.New("vst: AgentId must be valid UTF-8")
+
+// validateAgent enforces the AgentId UTF-8 contract documented on AgentId.
+// The empty string is allowed at this layer because normaliseAgent maps it
+// to AgentDefault.
+func validateAgent(a AgentId) error {
+	if !utf8.ValidString(string(a)) {
+		return ErrInvalidAgent
+	}
+	return nil
+}
 
 // normaliseAgent maps the empty string to AgentDefault. Callers should
 // always pass the result of this through to per-agent state lookups.

@@ -50,6 +50,9 @@ func (v *VST) CommitOptimized(msg string) (types.SnapshotID, types.CommitMetrics
 // `agentRW` lazily inserts into `v.agents` — an unlocked insert collides
 // with a concurrent map write and panics. Locking is now mandatory.
 func (v *VST) CommitOptimizedForAgent(agent AgentId, msg string) (types.SnapshotID, types.CommitMetrics, error) {
+	if err := validateAgent(agent); err != nil {
+		return "", types.CommitMetrics{}, err
+	}
 	_ = msg // commit message currently unused (parity with Commit)
 	start := time.Now()
 

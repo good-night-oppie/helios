@@ -315,18 +315,77 @@ func TestVST_CommitOptimizedForAgent_ConcurrentRace(t *testing.T) {
 	}
 	wg.Wait()
 
-	// After Rounds rounds, every agent should have a committed snapshot
-	// installed in v.snaps. We can't easily inspect snaps here without
-	// exposing internals, so just verify that reads of the latest-written
-	// path return either the latest value (race: write→read with no commit
-	// in between) or nil (COW swap removed all entries post-commit).
+	// Every goroutine's inner loop is Write -> Commit (no trailing Write),
+	// so the final post-loop state for each agent must have a freshly
+	// COW-swapped empty cur. With L1/L2 unattached, ReadFileForAgent
+	// falls through pathToHash and returns (nil, nil). Asserting that
+	// got is nil for the last-written path is the externally observable
+	// signal that the COW swap actually happened on the final Commit;
+	// pre-fix, the racy commit could leave cur unchanged and ReadFile
+	// would return the last-written value, silently regressing the
+	// concurrency fix without this assertion.
 	for k := 0; k < K; k++ {
 		agent := AgentId(fmt.Sprintf("commit-agent-%d", k))
-		got, err := v.ReadFileForAgent(agent, "r0.txt")
+		lastPath := fmt.Sprintf("r%d.txt", Rounds-1)
+		got, err := v.ReadFileForAgent(agent, lastPath)
 		if err != nil {
-			t.Fatalf("post-loop read agent=%s: %v", agent, err)
+			t.Fatalf("post-loop read agent=%s path=%s: %v", agent, lastPath, err)
 		}
-		_ = got // value depends on COW timing; we only assert no error / no race
+		if got != nil {
+			t.Errorf("post-loop read agent=%s path=%s: expected nil (cur swapped empty by final Commit, no L1/L2 attached), got=%q",
+				agent, lastPath, got)
+		}
+	}
+}
+
+// TestVST_ForAgent_RejectsInvalidUTF8 pins the AgentId contract from agent.go:
+// error-returning *ForAgent methods must surface ErrInvalidAgent for non-UTF-8
+// IDs; void / bool methods must silently no-op so a corrupt ID never reaches
+// the internal v.agents map (which would otherwise pollute iteration and
+// serialization downstream).
+func TestVST_ForAgent_RejectsInvalidUTF8(t *testing.T) {
+	v := New()
+	bad := AgentId("\xff\xfe-not-utf8")
+
+	if err := v.WriteFileForAgent(bad, "p", []byte("x")); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("WriteFileForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if _, err := v.ReadFileForAgent(bad, "p"); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("ReadFileForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if _, _, err := v.CommitForAgent(bad, ""); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("CommitForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if _, _, err := v.CommitOptimizedForAgent(bad, ""); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("CommitOptimizedForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if err := v.RestoreForAgent(bad, types.SnapshotID(""), types.RestoreOpts{DryRun: true}); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("RestoreForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if _, err := v.ForkForAgent(bad, types.SnapshotID("")); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("ForkForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if err := v.CreateBranchForAgent(bad, "b", types.SnapshotID("")); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("CreateBranchForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+	if err := v.DeleteBranchForAgent(bad, "b"); !errors.Is(err, ErrInvalidAgent) {
+		t.Errorf("DeleteBranchForAgent: got err=%v, want ErrInvalidAgent", err)
+	}
+
+	// Void / bool methods silently no-op; key invariant is that the invalid
+	// ID never lands in v.agents (would corrupt iteration / serialisation).
+	v.DeleteFileForAgent(bad, "p")
+	if _, ok := v.BranchHeadForAgent(bad, "b"); ok {
+		t.Errorf("BranchHeadForAgent: invalid agent returned ok=true")
+	}
+	if m := v.BranchesForAgent(bad); len(m) != 0 {
+		t.Errorf("BranchesForAgent: invalid agent returned %d branches, want 0", len(m))
+	}
+	v.mu.RLock()
+	_, polluted := v.agents[bad]
+	v.mu.RUnlock()
+	if polluted {
+		t.Errorf("v.agents leaked invalid AgentId %q despite validation gate", bad)
 	}
 }
 
