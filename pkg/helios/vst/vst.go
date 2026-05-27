@@ -109,6 +109,11 @@ func (v *VST) DeleteFile(path string) {
 // DeleteFileForAgent removes a file from the named agent's working set.
 // No-op for unknown agents (no state to delete from) and silently skips
 // invalid (non-UTF-8) AgentIds since this method does not return an error.
+//
+// Both s.cur AND s.pathToHash must be cleared. Without the second delete,
+// a path that survives a prior Commit (cur is swapped empty but pathToHash
+// retains path→hash) would still be readable from L1/L2 via
+// ReadFileForAgent's fallback, violating working-set delete semantics.
 func (v *VST) DeleteFileForAgent(agent AgentId, path string) {
 	if validateAgent(agent) != nil {
 		return
@@ -116,6 +121,7 @@ func (v *VST) DeleteFileForAgent(agent AgentId, path string) {
 	v.mu.Lock()
 	if s, ok := v.agentRO(agent); ok {
 		delete(s.cur, path)
+		delete(s.pathToHash, path)
 	}
 	v.mu.Unlock()
 }

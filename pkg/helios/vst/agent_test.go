@@ -437,3 +437,64 @@ func TestVST_RestoreForAgent_Isolation(t *testing.T) {
 		t.Fatalf("beta post-alpha-restore: got=%q want=b-original (cross-tenant leak)", gotB)
 	}
 }
+
+// TestVST_DeleteFileForAgent_ClearsPathToHash pins working-set delete
+// semantics. Pre-fix, DeleteFileForAgent removed only s.cur[path] but
+// left s.pathToHash[path] intact. After a Commit, cur is COW-swapped
+// empty but pathToHash retains every committed path; a subsequent
+// Delete-then-Read would still resolve via the pathToHash fallback
+// (L1/L2 lookup in production wiring), so a "deleted" file could be
+// silently resurrected from cache/store.
+//
+// White-box: directly inspect s.pathToHash. This is enough to pin the
+// invariant without dragging in pebble/objstore wiring for an L1/L2
+// end-to-end round-trip.
+func TestVST_DeleteFileForAgent_ClearsPathToHash(t *testing.T) {
+	v := New()
+	const a AgentId = "delete-agent"
+	const p = "doomed.txt"
+
+	if err := v.WriteFileForAgent(a, p, []byte("payload")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, err := v.CommitForAgent(a, ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// After Commit, cur is empty but pathToHash holds the path -> hash entry.
+	v.mu.RLock()
+	s, ok := v.agentRO(a)
+	if !ok {
+		v.mu.RUnlock()
+		t.Fatal("agent state missing post-commit")
+	}
+	if _, hasHash := s.pathToHash[p]; !hasHash {
+		v.mu.RUnlock()
+		t.Fatal("pathToHash missing entry post-commit (commit did not register path)")
+	}
+	v.mu.RUnlock()
+
+	v.DeleteFileForAgent(a, p)
+
+	// Both maps must be free of p after Delete; otherwise ReadFileForAgent
+	// would fall through to pathToHash and return the L1/L2-resident value.
+	v.mu.RLock()
+	if _, stillInCur := s.cur[p]; stillInCur {
+		t.Errorf("DeleteFileForAgent: cur[%q] not cleared", p)
+	}
+	if _, stillInPath := s.pathToHash[p]; stillInPath {
+		t.Errorf("DeleteFileForAgent: pathToHash[%q] not cleared — deleted file would resurrect via L1/L2 fallback", p)
+	}
+	v.mu.RUnlock()
+
+	// Externally observable: with no L1/L2 attached, Read returns nil
+	// either way; this gives a defensive end-to-end check that the
+	// fast path also reports the file as absent.
+	got, err := v.ReadFileForAgent(a, p)
+	if err != nil {
+		t.Fatalf("post-delete read: %v", err)
+	}
+	if got != nil {
+		t.Errorf("post-delete read: got=%q want=nil", got)
+	}
+}
