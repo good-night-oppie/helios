@@ -90,6 +90,44 @@ impl From<String> for SnapshotId {
     }
 }
 
+/// AgentId names a tenant in the multi-tenant VST namespace.
+///
+/// Identical to the Go-side `vst.AgentId` (string newtype). String form
+/// is sent across FFI as a (ptr, len) pair so embedded NUL bytes are
+/// not required to be encoded. The reserved value `"default"` (also
+/// available via `AgentId::default()` or `AGENT_DEFAULT`) is the agent
+/// the legacy single-tenant API resolves to, so legacy callers and
+/// new multi-tenant callers see the same data when they share that ID.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct AgentId(pub String);
+
+/// Reserved agent string used by the legacy single-tenant API.
+pub const AGENT_DEFAULT: &str = "default";
+
+impl From<&str> for AgentId {
+    fn from(s: &str) -> Self {
+        AgentId(s.to_owned())
+    }
+}
+
+impl From<String> for AgentId {
+    fn from(s: String) -> Self {
+        AgentId(s)
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        AgentId(AGENT_DEFAULT.to_owned())
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// BranchId names a mutable head pointer.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BranchId(pub String);
@@ -221,6 +259,195 @@ impl Vst {
                 self.handle,
                 bytes.as_ptr() as *const i8,
                 bytes.len(),
+                &mut fh,
+            )
+        };
+        rc_to_result(rc)?;
+        Ok(Fork {
+            handle: fh,
+            _vst: std::marker::PhantomData,
+        })
+    }
+
+    // -- Per-agent (multi-tenant) variants -------------------------------
+    //
+    // Each method targets a specific AgentId tenant in the VST namespace,
+    // mirroring the Go-side `*ForAgent` API (PR-VA-1a, #46). The AgentId
+    // string crosses FFI as a (ptr, len) pair — NOT a NUL-terminated CString
+    // — so interior NUL bytes need no escaping and the Go side decodes it with
+    // `goStringFromCN`. An empty AgentId is sent as (NULL, 0); the Go side
+    // normalises both "" and "default" to AGENT_DEFAULT, so the legacy
+    // non-agent methods above and `AgentId::default()` resolve to one tenant.
+
+    /// Write `data` at `path` in `agent`'s working set.
+    pub fn write_file_for_agent(
+        &self,
+        agent: &AgentId,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let c_path = CString::new(path)?;
+        let agent_bytes = agent.0.as_bytes();
+        // SAFETY: handle valid; agent/path/data lifetimes outlive the call.
+        let rc = unsafe {
+            sys::helios_vst_write_file_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_path.as_ptr(),
+                if data.is_empty() { ptr::null() } else { data.as_ptr() },
+                data.len(),
+            )
+        };
+        rc_to_result(rc)
+    }
+
+    /// Read `agent`'s working-set content at `path`. Returns Ok(None) if absent.
+    pub fn read_file_for_agent(
+        &self,
+        agent: &AgentId,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let c_path = CString::new(path)?;
+        let agent_bytes = agent.0.as_bytes();
+        let mut buf: *mut u8 = ptr::null_mut();
+        let mut len: usize = 0;
+        // SAFETY: handle valid; out params are owned locals.
+        let rc = unsafe {
+            sys::helios_vst_read_file_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_path.as_ptr(),
+                &mut buf,
+                &mut len,
+            )
+        };
+        rc_to_result(rc)?;
+        Ok(copy_owned_buffer(buf, len))
+    }
+
+    /// Delete `path` from `agent`'s working set (no-op if absent).
+    pub fn delete_file_for_agent(&self, agent: &AgentId, path: &str) -> Result<(), Error> {
+        let c_path = CString::new(path)?;
+        let agent_bytes = agent.0.as_bytes();
+        // SAFETY: handle valid; agent/path lifetimes outlive the call.
+        let rc = unsafe {
+            sys::helios_vst_delete_file_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_path.as_ptr(),
+            )
+        };
+        rc_to_result(rc)
+    }
+
+    /// Commit `agent`'s working set and return the new SnapshotId.
+    pub fn commit_for_agent(&self, agent: &AgentId, msg: &str) -> Result<SnapshotId, Error> {
+        let c_msg = CString::new(msg)?;
+        let agent_bytes = agent.0.as_bytes();
+        let mut out: *mut i8 = ptr::null_mut();
+        let mut len: usize = 0;
+        // SAFETY: handle valid; out params are owned locals.
+        let rc = unsafe {
+            sys::helios_vst_commit_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_msg.as_ptr(),
+                &mut out,
+                &mut len,
+            )
+        };
+        rc_to_result(rc)?;
+        Ok(SnapshotId(copy_owned_string(out, len)))
+    }
+
+    /// Restore a committed snapshot into `agent`'s working set (memory only;
+    /// no filesystem materialisation).
+    pub fn restore_for_agent(&self, agent: &AgentId, id: &SnapshotId) -> Result<(), Error> {
+        let agent_bytes = agent.0.as_bytes();
+        let id_bytes = id.0.as_bytes();
+        // SAFETY: handle valid; agent/id lifetimes outlive the call.
+        let rc = unsafe {
+            sys::helios_vst_restore_memory_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                id_bytes.as_ptr() as *const i8,
+                id_bytes.len(),
+            )
+        };
+        rc_to_result(rc)
+    }
+
+    /// Register a named branch in `agent`'s namespace pointing at `head`.
+    pub fn create_branch_for_agent(
+        &self,
+        agent: &AgentId,
+        name: &BranchId,
+        head: &SnapshotId,
+    ) -> Result<(), Error> {
+        let c_name = CString::new(name.0.as_str())?;
+        let agent_bytes = agent.0.as_bytes();
+        let head_bytes = head.0.as_bytes();
+        // SAFETY: handle valid; agent/name/head lifetimes outlive the call.
+        let rc = unsafe {
+            sys::helios_vst_create_branch_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_name.as_ptr(),
+                head_bytes.as_ptr() as *const i8,
+                head_bytes.len(),
+            )
+        };
+        rc_to_result(rc)
+    }
+
+    /// Return the current head SnapshotId for a branch in `agent`'s namespace,
+    /// or None if unknown.
+    pub fn branch_head_for_agent(
+        &self,
+        agent: &AgentId,
+        name: &BranchId,
+    ) -> Result<Option<SnapshotId>, Error> {
+        let c_name = CString::new(name.0.as_str())?;
+        let agent_bytes = agent.0.as_bytes();
+        let mut out: *mut i8 = ptr::null_mut();
+        let mut len: usize = 0;
+        // SAFETY: handle valid; out params are owned locals.
+        let rc = unsafe {
+            sys::helios_vst_branch_head_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                c_name.as_ptr(),
+                &mut out,
+                &mut len,
+            )
+        };
+        match rc_to_result(rc) {
+            Ok(()) => Ok(Some(SnapshotId(copy_owned_string(out, len)))),
+            Err(Error::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Open a copy-on-write Fork in `agent`'s namespace rooted at `base`.
+    pub fn fork_for_agent(&self, agent: &AgentId, base: &SnapshotId) -> Result<Fork<'_>, Error> {
+        let agent_bytes = agent.0.as_bytes();
+        let base_bytes = base.0.as_bytes();
+        let mut fh: sys::helios_fork_t = 0;
+        // SAFETY: handle valid; out param is an owned local.
+        let rc = unsafe {
+            sys::helios_fork_new_for_agent(
+                self.handle,
+                if agent_bytes.is_empty() { ptr::null() } else { agent_bytes.as_ptr() as *const i8 },
+                agent_bytes.len(),
+                base_bytes.as_ptr() as *const i8,
+                base_bytes.len(),
                 &mut fh,
             )
         };
@@ -441,6 +668,79 @@ mod tests {
             "Fork overlay: empty file must be Some(vec![]) not None"
         );
         f.discard();
+    }
+
+    // PR-VA-1a: multi-tenant isolation across the FFI. A write under one
+    // AgentId must not be visible to a different AgentId, and the legacy
+    // non-agent API must alias the same tenant as AgentId::default()
+    // ("default"), because the Go side normalises "" -> AGENT_DEFAULT.
+    #[test]
+    fn test_agent_tenant_roundtrip_isolation() {
+        let v = Vst::new();
+        let alice: AgentId = "alice".into();
+        let bob: AgentId = "bob".into();
+
+        // Round-trip: alice writes, alice reads her own bytes back.
+        v.write_file_for_agent(&alice, "secret.txt", b"alice-data").unwrap();
+        assert_eq!(
+            v.read_file_for_agent(&alice, "secret.txt").unwrap(),
+            Some(b"alice-data".to_vec()),
+            "alice must read her own write"
+        );
+
+        // Isolation: bob cannot see alice's path (absent -> None, not bytes).
+        assert_eq!(
+            v.read_file_for_agent(&bob, "secret.txt").unwrap(),
+            None,
+            "bob must NOT see alice's file (tenant isolation)"
+        );
+
+        // Bob's independent write to the same path does not leak into alice.
+        v.write_file_for_agent(&bob, "secret.txt", b"bob-data").unwrap();
+        assert_eq!(
+            v.read_file_for_agent(&bob, "secret.txt").unwrap(),
+            Some(b"bob-data".to_vec()),
+            "bob reads his own write"
+        );
+        assert_eq!(
+            v.read_file_for_agent(&alice, "secret.txt").unwrap(),
+            Some(b"alice-data".to_vec()),
+            "alice's data is unchanged by bob's write to the same path"
+        );
+
+        // Legacy non-agent API aliases the "default" tenant, both directions.
+        v.write_file("legacy.txt", b"legacy").unwrap();
+        assert_eq!(
+            v.read_file_for_agent(&AgentId::default(), "legacy.txt").unwrap(),
+            Some(b"legacy".to_vec()),
+            "legacy WriteFile must be visible under AgentId::default()"
+        );
+        v.write_file_for_agent(&AgentId::default(), "default_write.txt", b"d").unwrap();
+        assert_eq!(
+            v.read_file("default_write.txt").unwrap(),
+            Some(b"d".to_vec()),
+            "default-tenant write must be visible via the legacy ReadFile"
+        );
+
+        // The default tenant is itself isolated from the named tenants.
+        assert_eq!(
+            v.read_file_for_agent(&alice, "legacy.txt").unwrap(),
+            None,
+            "alice must be isolated from the default tenant"
+        );
+
+        // Delete under one agent does not affect another agent's same-named path.
+        v.delete_file_for_agent(&bob, "secret.txt").unwrap();
+        assert_eq!(
+            v.read_file_for_agent(&bob, "secret.txt").unwrap(),
+            None,
+            "bob's delete removes bob's file"
+        );
+        assert_eq!(
+            v.read_file_for_agent(&alice, "secret.txt").unwrap(),
+            Some(b"alice-data".to_vec()),
+            "bob's delete must NOT touch alice's same-named path"
+        );
     }
 
     #[test]
