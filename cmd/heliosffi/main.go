@@ -220,6 +220,15 @@ func helios_vst_free(h C.uint64_t) C.int {
 
 //export helios_vst_write_file
 func helios_vst_write_file(h C.uint64_t, path *C.char, data *C.uchar, length C.size_t) C.int {
+	return writeFileImpl(h, "", path, data, length)
+}
+
+//export helios_vst_write_file_for_agent
+func helios_vst_write_file_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, path *C.char, data *C.uchar, length C.size_t) C.int {
+	return writeFileImpl(h, goStringFromCN(agentPtr, agentLen), path, data, length)
+}
+
+func writeFileImpl(h C.uint64_t, agent string, path *C.char, data *C.uchar, length C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -227,12 +236,13 @@ func helios_vst_write_file(h C.uint64_t, path *C.char, data *C.uchar, length C.s
 	if path == nil {
 		return cErrInvalidArg
 	}
-	// Copy the C bytes into a Go-owned slice (VST.WriteFile already copies but
-	// this keeps the contract explicit and avoids retaining the C pointer).
+	// Copy the C bytes into a Go-owned slice (VST.WriteFileForAgent already
+	// copies but this keeps the contract explicit and avoids retaining the
+	// C pointer.)
 	src := goBytesFromC(data, length)
 	cp := make([]byte, len(src))
 	copy(cp, src)
-	if err := v.WriteFile(goStringFromC(path), cp); err != nil {
+	if err := v.WriteFileForAgent(vst.AgentId(agent), goStringFromC(path), cp); err != nil {
 		return cErrInternal
 	}
 	return cOK
@@ -240,6 +250,15 @@ func helios_vst_write_file(h C.uint64_t, path *C.char, data *C.uchar, length C.s
 
 //export helios_vst_read_file
 func helios_vst_read_file(h C.uint64_t, path *C.char, outBuf **C.uchar, outLen *C.size_t) C.int {
+	return readFileImpl(h, "", path, outBuf, outLen)
+}
+
+//export helios_vst_read_file_for_agent
+func helios_vst_read_file_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, path *C.char, outBuf **C.uchar, outLen *C.size_t) C.int {
+	return readFileImpl(h, goStringFromCN(agentPtr, agentLen), path, outBuf, outLen)
+}
+
+func readFileImpl(h C.uint64_t, agent string, path *C.char, outBuf **C.uchar, outLen *C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -247,7 +266,7 @@ func helios_vst_read_file(h C.uint64_t, path *C.char, outBuf **C.uchar, outLen *
 	if path == nil {
 		return cErrInvalidArg
 	}
-	b, err := v.ReadFile(goStringFromC(path))
+	b, err := v.ReadFileForAgent(vst.AgentId(agent), goStringFromC(path))
 	if err != nil {
 		return cErrInternal
 	}
@@ -256,6 +275,15 @@ func helios_vst_read_file(h C.uint64_t, path *C.char, outBuf **C.uchar, outLen *
 
 //export helios_vst_delete_file
 func helios_vst_delete_file(h C.uint64_t, path *C.char) C.int {
+	return deleteFileImpl(h, "", path)
+}
+
+//export helios_vst_delete_file_for_agent
+func helios_vst_delete_file_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, path *C.char) C.int {
+	return deleteFileImpl(h, goStringFromCN(agentPtr, agentLen), path)
+}
+
+func deleteFileImpl(h C.uint64_t, agent string, path *C.char) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -263,7 +291,7 @@ func helios_vst_delete_file(h C.uint64_t, path *C.char) C.int {
 	if path == nil {
 		return cErrInvalidArg
 	}
-	v.DeleteFile(goStringFromC(path))
+	v.DeleteFileForAgent(vst.AgentId(agent), goStringFromC(path))
 	return cOK
 }
 
@@ -273,11 +301,20 @@ func helios_vst_delete_file(h C.uint64_t, path *C.char) C.int {
 
 //export helios_vst_commit
 func helios_vst_commit(h C.uint64_t, msg *C.char, outID **C.char, outLen *C.size_t) C.int {
+	return commitImpl(h, "", msg, outID, outLen)
+}
+
+//export helios_vst_commit_for_agent
+func helios_vst_commit_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, msg *C.char, outID **C.char, outLen *C.size_t) C.int {
+	return commitImpl(h, goStringFromCN(agentPtr, agentLen), msg, outID, outLen)
+}
+
+func commitImpl(h C.uint64_t, agent string, msg *C.char, outID **C.char, outLen *C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
 	}
-	id, _, err := v.Commit(goStringFromC(msg))
+	id, _, err := v.CommitForAgent(vst.AgentId(agent), goStringFromC(msg))
 	if err != nil {
 		return cErrInternal
 	}
@@ -286,6 +323,15 @@ func helios_vst_commit(h C.uint64_t, msg *C.char, outID **C.char, outLen *C.size
 
 //export helios_vst_restore_memory
 func helios_vst_restore_memory(h C.uint64_t, id *C.char, idLen C.size_t) C.int {
+	return restoreMemoryImpl(h, "", id, idLen)
+}
+
+//export helios_vst_restore_memory_for_agent
+func helios_vst_restore_memory_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, id *C.char, idLen C.size_t) C.int {
+	return restoreMemoryImpl(h, goStringFromCN(agentPtr, agentLen), id, idLen)
+}
+
+func restoreMemoryImpl(h C.uint64_t, agent string, id *C.char, idLen C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -293,7 +339,7 @@ func helios_vst_restore_memory(h C.uint64_t, id *C.char, idLen C.size_t) C.int {
 	sid := types.SnapshotID(goStringFromCN(id, idLen))
 	// In-memory restore only: bypass filesystem materialisation so the FFI
 	// path is suitable for hot agent loops (no PWD coupling, no atomic-rename).
-	if err := v.RestoreWithOpts(sid, types.RestoreOpts{DryRun: false, WriteToFilesystem: false}); err != nil {
+	if err := v.RestoreForAgent(vst.AgentId(agent), sid, types.RestoreOpts{DryRun: false, WriteToFilesystem: false}); err != nil {
 		return cErrNotFound
 	}
 	return cOK
@@ -305,6 +351,15 @@ func helios_vst_restore_memory(h C.uint64_t, id *C.char, idLen C.size_t) C.int {
 
 //export helios_vst_create_branch
 func helios_vst_create_branch(h C.uint64_t, name *C.char, head *C.char, headLen C.size_t) C.int {
+	return createBranchImpl(h, "", name, head, headLen)
+}
+
+//export helios_vst_create_branch_for_agent
+func helios_vst_create_branch_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, name *C.char, head *C.char, headLen C.size_t) C.int {
+	return createBranchImpl(h, goStringFromCN(agentPtr, agentLen), name, head, headLen)
+}
+
+func createBranchImpl(h C.uint64_t, agent string, name *C.char, head *C.char, headLen C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -312,7 +367,7 @@ func helios_vst_create_branch(h C.uint64_t, name *C.char, head *C.char, headLen 
 	if name == nil {
 		return cErrInvalidArg
 	}
-	err := v.CreateBranch(vst.BranchID(goStringFromC(name)), types.SnapshotID(goStringFromCN(head, headLen)))
+	err := v.CreateBranchForAgent(vst.AgentId(agent), vst.BranchID(goStringFromC(name)), types.SnapshotID(goStringFromCN(head, headLen)))
 	switch err {
 	case nil:
 		return cOK
@@ -325,11 +380,20 @@ func helios_vst_create_branch(h C.uint64_t, name *C.char, head *C.char, headLen 
 
 //export helios_vst_branch_head
 func helios_vst_branch_head(h C.uint64_t, name *C.char, outID **C.char, outLen *C.size_t) C.int {
+	return branchHeadImpl(h, "", name, outID, outLen)
+}
+
+//export helios_vst_branch_head_for_agent
+func helios_vst_branch_head_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, name *C.char, outID **C.char, outLen *C.size_t) C.int {
+	return branchHeadImpl(h, goStringFromCN(agentPtr, agentLen), name, outID, outLen)
+}
+
+func branchHeadImpl(h C.uint64_t, agent string, name *C.char, outID **C.char, outLen *C.size_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
 	}
-	id, ok := v.BranchHead(vst.BranchID(goStringFromC(name)))
+	id, ok := v.BranchHeadForAgent(vst.AgentId(agent), vst.BranchID(goStringFromC(name)))
 	if !ok {
 		return cErrNotFound
 	}
@@ -342,6 +406,15 @@ func helios_vst_branch_head(h C.uint64_t, name *C.char, outID **C.char, outLen *
 
 //export helios_fork_new
 func helios_fork_new(h C.uint64_t, base *C.char, baseLen C.size_t, outForkHdl *C.uint64_t) C.int {
+	return forkNewImpl(h, "", base, baseLen, outForkHdl)
+}
+
+//export helios_fork_new_for_agent
+func helios_fork_new_for_agent(h C.uint64_t, agentPtr *C.char, agentLen C.size_t, base *C.char, baseLen C.size_t, outForkHdl *C.uint64_t) C.int {
+	return forkNewImpl(h, goStringFromCN(agentPtr, agentLen), base, baseLen, outForkHdl)
+}
+
+func forkNewImpl(h C.uint64_t, agent string, base *C.char, baseLen C.size_t, outForkHdl *C.uint64_t) C.int {
 	v := lookupVST(uint64(h))
 	if v == nil {
 		return cErrInvalidHdl
@@ -349,7 +422,7 @@ func helios_fork_new(h C.uint64_t, base *C.char, baseLen C.size_t, outForkHdl *C
 	if outForkHdl == nil {
 		return cErrInvalidArg
 	}
-	f, err := v.Fork(types.SnapshotID(goStringFromCN(base, baseLen)))
+	f, err := v.ForkForAgent(vst.AgentId(agent), types.SnapshotID(goStringFromCN(base, baseLen)))
 	if err != nil {
 		return cErrNotFound
 	}

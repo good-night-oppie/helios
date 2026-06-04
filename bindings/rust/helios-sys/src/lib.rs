@@ -43,13 +43,35 @@ extern "C" {
         data: *const c_uchar,
         length: usize,
     ) -> c_int;
+    pub fn helios_vst_write_file_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
+        path: *const c_char,
+        data: *const c_uchar,
+        length: usize,
+    ) -> c_int;
     pub fn helios_vst_read_file(
         h: helios_vst_t,
         path: *const c_char,
         out_buf: *mut *mut c_uchar,
         out_len: *mut usize,
     ) -> c_int;
+    pub fn helios_vst_read_file_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
+        path: *const c_char,
+        out_buf: *mut *mut c_uchar,
+        out_len: *mut usize,
+    ) -> c_int;
     pub fn helios_vst_delete_file(h: helios_vst_t, path: *const c_char) -> c_int;
+    pub fn helios_vst_delete_file_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
+        path: *const c_char,
+    ) -> c_int;
 
     // -- VST commit / restore --------------------------------------------
     pub fn helios_vst_commit(
@@ -58,8 +80,23 @@ extern "C" {
         out_id: *mut *mut c_char,
         out_len: *mut usize,
     ) -> c_int;
+    pub fn helios_vst_commit_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
+        msg: *const c_char,
+        out_id: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
     pub fn helios_vst_restore_memory(
         h: helios_vst_t,
+        id: *const c_char,
+        id_len: usize,
+    ) -> c_int;
+    pub fn helios_vst_restore_memory_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
         id: *const c_char,
         id_len: usize,
     ) -> c_int;
@@ -71,8 +108,24 @@ extern "C" {
         head: *const c_char,
         head_len: usize,
     ) -> c_int;
+    pub fn helios_vst_create_branch_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
+        name: *const c_char,
+        head: *const c_char,
+        head_len: usize,
+    ) -> c_int;
     pub fn helios_vst_branch_head(
         h: helios_vst_t,
+        name: *const c_char,
+        out_id: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    pub fn helios_vst_branch_head_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
         name: *const c_char,
         out_id: *mut *mut c_char,
         out_len: *mut usize,
@@ -81,6 +134,14 @@ extern "C" {
     // -- Fork lifecycle ---------------------------------------------------
     pub fn helios_fork_new(
         h: helios_vst_t,
+        base: *const c_char,
+        base_len: usize,
+        out_fork: *mut helios_fork_t,
+    ) -> c_int;
+    pub fn helios_fork_new_for_agent(
+        h: helios_vst_t,
+        agent_ptr: *const c_char,
+        agent_len: usize,
         base: *const c_char,
         base_len: usize,
         out_fork: *mut helios_fork_t,
