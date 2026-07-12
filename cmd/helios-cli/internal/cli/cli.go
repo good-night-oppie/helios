@@ -56,23 +56,31 @@ type MatOpts struct {
 	Exclude []string
 }
 
-// HandleCommit processes commit command
+// HandleCommit processes commit command.
+//
+// Store resolution must be identical to materialize/diff/stats, which never
+// change directory: those resolve the store from the real invocation CWD via
+// DefaultEngineFactory -> os.Getwd() -> cli.ResolveStore. Previously HandleCommit
+// os.Chdir'd into workDir *before* the factory ran, so `commit --work W` wrote
+// the store under W/.helios/objects while materialize looked under
+// <invocation-CWD>/.helios/objects — the two disagreed and the commit was
+// unreadable unless HELIOS_STORE_DIR was set. Instead of chdir'ing, resolve the
+// engine (and thus the store) from the true CWD and ingest from workDir
+// explicitly.
 func HandleCommit(w io.Writer, cfg Config, workDir string) error {
-	if workDir != "" {
-		if err := os.Chdir(workDir); err != nil {
-			return fmt.Errorf("work dir: %w", err)
-		}
-	}
-
-	eng, err := cfg.EngineFactory()
+	eng, err := cfg.EngineFactory() // resolves the store from the real CWD, exactly like materialize
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
 
-	// Ingest current working directory into the engine before committing.
-	// This populates v.cur so that Commit() has real blobs to persist into L2.
-	if err := ingestCurrentDir(eng); err != nil {
+	// Ingest the working directory into the engine before committing so Commit()
+	// has real blobs to persist into L2. An empty workDir means the current dir.
+	root := workDir
+	if root == "" {
+		root = "."
+	}
+	if err := ingestDir(eng, root); err != nil {
 		return err
 	}
 
@@ -87,12 +95,12 @@ func HandleCommit(w io.Writer, cfg Config, workDir string) error {
 	return json.NewEncoder(w).Encode(out)
 }
 
-// ingestCurrentDir walks the current working dir and writes regular files
-// into the engine using relative, slash-normalized paths.
-// Skips internal folders like .git and .helios.
-func ingestCurrentDir(eng interface{ WriteFile(string, []byte) error }) error {
-    root, err := os.Getwd()
-    if err != nil { return err }
+// ingestDir walks root and writes regular files into the engine using relative,
+// slash-normalized paths. Skips internal folders like .git and .helios. root is
+// taken explicitly (rather than os.Getwd()) so the caller controls which tree is
+// ingested without changing the process working directory — keeping store
+// resolution consistent across commands.
+func ingestDir(eng interface{ WriteFile(string, []byte) error }, root string) error {
     skip := map[string]struct{}{".git": {}, ".helios": {}}
 
     return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
