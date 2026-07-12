@@ -58,8 +58,12 @@ jobs:
           # Locate the first "main" package inside /cmd/*
           MAIN="$(go list -f '{{if eq .Name "main"}}{{.Dir}}{{end}}' ./... | grep -E '/cmd/[^/]+$' | head -n1)"
           mkdir -p dist
-          # Build the binary into dist/helios
-          CGO_ENABLED=1 go build -C "$MAIN" -o dist/helios .
+          # Build the binary into the repo-root dist/helios. Pass $MAIN as the build
+          # target (not `-C "$MAIN" ... .`): with `-C`, the `-o dist/helios` output path
+          # is resolved relative to $MAIN, so the artifact landed in $MAIN/dist/helios
+          # and the repo-root sha256sum below only ever "found" the committed binary.
+          # Once that tracked binary is untracked this step must build to the real path.
+          CGO_ENABLED=1 go build -o dist/helios "$MAIN"
           # Generate SHA256 checksum
           sha256sum dist/helios | tee dist/helios.sha256
           # Leave a trailing newline here to safely end the block
