@@ -18,6 +18,7 @@ package vst
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -463,6 +464,14 @@ func (v *VST) RestoreForAgent(agent AgentId, id types.SnapshotID, opts types.Res
 			oldTrackedFiles[path] = true
 		}
 	}
+	// hadInMemoryTracking records whether the agent had a known working set at the
+	// start of restore. When true we prune precisely via oldTrackedFiles (below).
+	// When false — a cold process where nothing has been committed/restored
+	// in-process — oldTrackedFiles is empty, the precise prune catches nothing,
+	// and we fall back to a filesystem walk to reconcile the working tree with the
+	// snapshot. Gating the walk on this flag keeps in-process/library callers
+	// (whose working set is populated) from ever pruning unrelated CWD contents.
+	hadInMemoryTracking := len(oldTrackedFiles) > 0
 	v.mu.RUnlock()
 
 	if !ok && v.l2 == nil {
@@ -577,7 +586,9 @@ func (v *VST) RestoreForAgent(agent AgentId, id types.SnapshotID, opts types.Res
 			dprintf("restored file %s (%d bytes)", path, len(content))
 		}
 		
-		// Clean up stale files that were tracked before but are not in the restored snapshot
+		// Clean up stale files that were tracked before but are not in the restored
+		// snapshot. Precise path: only touches files the in-memory working set knew
+		// about, so it never removes unrelated CWD contents.
 		for stalePath := range oldTrackedFiles {
 			fullPath := filepath.Join(cwd, stalePath)
 			if err := os.Remove(fullPath); err != nil {
@@ -586,6 +597,47 @@ func (v *VST) RestoreForAgent(agent AgentId, id types.SnapshotID, opts types.Res
 			} else {
 				dprintf("removed stale file %s", stalePath)
 			}
+		}
+
+		// Cold-process fallback. When the agent had no in-memory working set,
+		// oldTrackedFiles was empty and the precise prune above caught nothing, so
+		// files present on disk but absent from the snapshot would leak in (the
+		// vst.go:459-465 root cause). Reconcile by walking cwd and removing any
+		// regular file whose slash-normalized path relative to cwd is not a key of
+		// restoredContent, making the working tree MATCH the snapshot. Skip .git/
+		// and .helios/ exactly like ingest does, and remove only regular files —
+		// never directories, never the object store — preserving the
+		// never-fail-on-cleanup posture above. Gated on !hadInMemoryTracking so
+		// in-process/library callers (whose working set is populated before
+		// restore) never trigger this broad walk.
+		if !hadInMemoryTracking {
+			_ = filepath.WalkDir(cwd, func(p string, d fs.DirEntry, werr error) error {
+				if werr != nil {
+					return werr
+				}
+				if d.IsDir() {
+					if name := d.Name(); name == ".git" || name == ".helios" {
+						return fs.SkipDir
+					}
+					return nil
+				}
+				if !d.Type().IsRegular() {
+					return nil
+				}
+				rel, relErr := filepath.Rel(cwd, p)
+				if relErr != nil {
+					return nil
+				}
+				rel = filepath.ToSlash(rel)
+				if _, keep := restoredContent[rel]; !keep {
+					if err := os.Remove(p); err != nil {
+						dprintf("stale remove failed %s: %v", rel, err)
+					} else {
+						dprintf("pruned stale file %s", rel)
+					}
+				}
+				return nil
+			})
 		}
 	} else if opts.DryRun || !opts.WriteToFilesystem {
 		dprintf("dry-run mode: skipped writing %d files to filesystem", len(restoredContent))
