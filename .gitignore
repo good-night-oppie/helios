@@ -48,6 +48,9 @@ bin/
 *.so
 *.dylib
 
+# Prebuilt CLI binary — never commit; build from HEAD (go build ./cmd/helios-cli)
+/helios-cli
+
 # FFI bridge build artefacts (cgo c-archive + cgo-generated header + C smoke binary)
 bindings/c/libhelios.a
 bindings/c/libhelios.h
