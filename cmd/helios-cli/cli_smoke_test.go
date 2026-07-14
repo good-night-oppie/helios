@@ -15,12 +15,30 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+// runCLIStdout runs the built CLI and returns only its STDOUT. Commit/stats emit
+// their JSON result on stdout; Pebble WAL-replay chatter goes to stderr (which
+// happens whenever the resolved store already exists — e.g. once commit and
+// stats share the same store directory). Parsing stdout only keeps the JSON
+// assertions robust to that stderr noise; stderr is surfaced on failure.
+func runCLIStdout(t *testing.T, bin string, args ...string) []byte {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s %v failed: %v\nstderr:\n%s", bin, args, err, stderr.String())
+	}
+	return stdout.Bytes()
+}
 
 // We only assert "shape", not long strings, to keep golden stable.
 func TestCLI_CommitAndStats_Smoke(t *testing.T) {
@@ -34,10 +52,7 @@ func TestCLI_CommitAndStats_Smoke(t *testing.T) {
 
 	// Run `commit` on an empty work dir; CLI should not panic and must print JSON
 	work := t.TempDir()
-	outC, err := exec.Command(bin, "commit", "--work", work).CombinedOutput()
-	if err != nil {
-		t.Fatalf("commit failed: %v\n%s", err, string(outC))
-	}
+	outC := runCLIStdout(t, bin, "commit", "--work", work)
 	var jc map[string]any
 	if err := json.Unmarshal(outC, &jc); err != nil {
 		t.Fatalf("commit output is not JSON: %v\n%s", err, string(outC))
@@ -47,10 +62,7 @@ func TestCLI_CommitAndStats_Smoke(t *testing.T) {
 	}
 
 	// `stats` should be valid JSON and contain a top-level "l1"
-	outS, err := exec.Command(bin, "stats").CombinedOutput()
-	if err != nil {
-		t.Fatalf("stats failed: %v\n%s", err, string(outS))
-	}
+	outS := runCLIStdout(t, bin, "stats")
 	var js map[string]any
 	if err := json.Unmarshal(outS, &js); err != nil {
 		t.Fatalf("stats output is not JSON: %v\n%s", err, string(outS))
